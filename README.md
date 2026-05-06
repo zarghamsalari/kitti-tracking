@@ -4,12 +4,12 @@ A reproducible pipeline:
 
 > YOLOv8 detector → ByteTrack / BoT-SORT → HOTA / MOTA / IDF1 evaluation on KITTI 2D MOT.
 
-[![CI](https://github.com/USER/kitti-tracking/actions/workflows/ci.yml/badge.svg)](https://github.com/USER/kitti-tracking/actions/workflows/ci.yml)
+[![CI](https://github.com/zarghamsalari/kitti-tracking/actions/workflows/ci.yml/badge.svg)](https://github.com/zarghamsalari/kitti-tracking/actions/workflows/ci.yml)
 
 ## Quick start
 
 ```bash
-git clone https://github.com/USER/kitti-tracking.git
+git clone https://github.com/zarghamsalari/kitti-tracking.git
 cd kitti-tracking
 make install
 make download          # ~15 GB
