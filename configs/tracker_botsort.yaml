@@ -1,0 +1,22 @@
+# BoT-SORT config (task T7)
+tracker:
+  name: botsort
+  track_thresh: 0.5
+  match_thresh: 0.8
+  track_buffer: 30
+  new_track_thresh: 0.6
+  proximity_thresh: 0.5    # IoU gate for ReID association
+  appearance_thresh: 0.25  # cosine distance threshold for appearance match
+  with_reid: true
+  reid_model: osnet_x0_25_msmt17  # lightweight ReID backbone
+  cmc_method: sparseOptFlow       # camera motion compensation
+  frame_rate: 10
+
+input:
+  detections_dir: runs/det/yolov8m_finetuned
+
+output:
+  tracks_dir: runs/track/botsort
+  format: mot16
+
+seed: 42

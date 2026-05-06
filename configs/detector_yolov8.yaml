@@ -1,0 +1,28 @@
+# YOLOv8 detector config (tasks T3 + T4)
+detector:
+  model: yolov8m.pt           # COCO pretrained, used for zero-shot baseline
+  finetuned_weights: runs/det/finetune/weights/best.pt
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  classes: [car, pedestrian]   # KITTI subset; cyclist optional
+  device: 0                    # GPU index, "cpu" for CPU-only
+  imgsz: 1280                  # KITTI images are 1242x375 — bias high
+
+finetune:
+  epochs: 50
+  batch: 16
+  imgsz: 1280
+  lr0: 0.001
+  patience: 10
+  optimizer: AdamW
+  cos_lr: true
+  seed: 42
+
+dataset:
+  root: data/kitti_tracking
+  train_sequences: ["0000", "0002", "0003", "0004", "0005", "0007", "0008", "0009", "0010", "0011", "0012", "0014", "0015", "0016", "0018", "0020"]
+  val_sequences: ["0001", "0006", "0013", "0017", "0019"]
+
+output:
+  detections_dir: runs/det/yolov8m_finetuned
+  format: mot16    # frame, id=-1, x, y, w, h, conf, -1, -1, -1

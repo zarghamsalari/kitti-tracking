@@ -1,0 +1,17 @@
+# ByteTrack config (task T5)
+tracker:
+  name: bytetrack
+  track_thresh: 0.5      # low-confidence detection threshold for second association
+  match_thresh: 0.8      # IoU threshold for matching
+  track_buffer: 30       # frames to keep lost tracks alive
+  high_thresh: 0.6       # confidence threshold for new track creation
+  frame_rate: 10         # KITTI MOT is 10 fps
+
+input:
+  detections_dir: runs/det/yolov8m_finetuned
+
+output:
+  tracks_dir: runs/track/bytetrack
+  format: mot16
+
+seed: 42
