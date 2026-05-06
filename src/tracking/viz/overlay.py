@@ -16,11 +16,12 @@ import numpy as np
 
 def id_to_color(track_id: int) -> tuple[int, int, int]:
     """Deterministic color for a track ID. Returns BGR for OpenCV."""
-    rng = np.random.default_rng(seed=track_id)
-    h, s, v = rng.integers(0, 180), 200, 255
     import cv2
 
-    bgr = cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2BGR)[0][0]
+    rng = np.random.default_rng(seed=track_id)
+    h = int(rng.integers(0, 180))
+    hsv = np.array([[[h, 200, 255]]], dtype=np.uint8)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]
     return int(bgr[0]), int(bgr[1]), int(bgr[2])
 
 

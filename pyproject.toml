@@ -36,6 +36,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.9",
     "pre-commit>=3.7",
+    "types-PyYAML>=6.0",
     "ipykernel>=6.29",
     "jupyter>=1.0",
 ]
@@ -55,6 +56,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
 ignore = ["E501"]  # handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
+"src/tracking/cli.py" = ["B008"]
 "tests/**" = ["N802", "N803"]
 
 [tool.mypy]
@@ -70,6 +72,7 @@ disallow_untyped_defs = true   # strict where bugs hide
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
     "slow: tests that need real KITTI data or GPU (excluded from CI)",
 ]
