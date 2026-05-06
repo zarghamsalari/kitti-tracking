@@ -16,6 +16,7 @@ build/
 dist/
 .eggs/
 .venv/
+.venv*/
 venv/
 env/
 .python-version
