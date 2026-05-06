@@ -39,6 +39,9 @@ dev = [
     "types-PyYAML>=6.0",
     "ipykernel>=6.29",
     "jupyter>=1.0",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "nbstripout>=0.7",
 ]
 
 [project.scripts]
