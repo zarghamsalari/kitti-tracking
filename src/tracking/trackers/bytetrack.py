@@ -27,6 +27,4 @@ from typing import Any
 
 
 def run_bytetrack(config: dict[str, Any]) -> None:
-    raise NotImplementedError(
-        "Task T5. See module docstring for the implementation plan."
-    )
+    raise NotImplementedError("Task T5. See module docstring for the implementation plan.")
