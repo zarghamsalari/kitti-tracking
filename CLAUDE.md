@@ -85,7 +85,7 @@ Rule: never split frames within a sequence. Sequence-level holdout only. Frame l
 Pick them off in roughly this order — each builds on the previous. No time pressure; the project resumes wherever the last `[x]` is.
 
 - [x] **T0 — Scaffold.** Repo structure, packaging, CI, configs, KITTI loader + tests, stubs.
-- [ ] **T1 — Push to GitHub + verify CI.** Init git, push to a new GitHub repo, branch protection on `main`, confirm Actions runs green on the existing test suite.
+- [x] **T1 — Push to GitHub + verify CI.** Init git, push to a new GitHub repo, branch protection on `main`, confirm Actions runs green on the existing test suite.
 - [ ] **T2 — KITTI download + smoke notebook.** `make download` works end-to-end. `notebooks/01_explore_kitti.ipynb` loads each sequence, prints class distribution, renders a few GT-overlaid frames.
 - [ ] **T3 — Detection: zero-shot.** Run YOLOv8m COCO-pretrained on KITTI val (COCO car→Car, person→Pedestrian). Log per-class mAP. Save MOT16 detections under `runs/det/yolov8m_zeroshot/`.
 - [ ] **T4 — Detection: fine-tune.** Convert KITTI labels to YOLO format (sequence-respecting train/val split), fine-tune YOLOv8m at imgsz=1280 for 30–50 epochs. Save MOT16 detections under `runs/det/yolov8m_finetuned/`.
