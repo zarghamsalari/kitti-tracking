@@ -32,15 +32,116 @@ import yaml
 
 from tracking.data.kitti import KittiAnnotation, KittiSequence
 
-KITTI_TO_YOLO_ZEROSHOT: dict[str, int] = {
+# KITTI -> 2-class YOLO mapping for fine-tune (T4). The output head will be
+# rebuilt with nc=2 during fine-tuning, so we use a contiguous [0, 1] space.
+KITTI_TO_YOLO_FINETUNE: dict[str, int] = {
     "Car": 0,
     "Pedestrian": 1,
 }
+
+# KITTI -> COCO80 mapping for zero-shot eval (T3b). The COCO-pretrained model
+# emits predictions in COCO index space; for ``model.val()`` to match
+# predictions to ground truth by class, GT labels must use the SAME indices.
+KITTI_TO_COCO_ZEROSHOT: dict[str, int] = {
+    "Car": 2,  # COCO 'car'
+    "Pedestrian": 0,  # COCO 'person'
+}
+
+# Back-compat alias so external code that imported KITTI_TO_YOLO_ZEROSHOT
+# (from T3a, before the zero-shot vs fine-tune distinction was clear) still
+# resolves. Prefer the explicit names above for new code.
+KITTI_TO_YOLO_ZEROSHOT = KITTI_TO_YOLO_FINETUNE
 
 # Canonical KITTI image size — actual dims are read per-sequence in
 # write_yolo_labels (see _read_image_size). Kept here for fixtures, docs,
 # and the optional override path of write_yolo_labels.
 KITTI_IMAGE_SIZE: tuple[int, int] = (1242, 375)
+
+# Standard COCO80 class names — emitted in the order the COCO-pretrained
+# YOLOv8 model uses internally. Required in data.yaml when running
+# zero-shot eval, so ultralytics knows what each class index means.
+COCO80_NAMES: list[str] = [
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
+]
 
 
 def bbox_to_yolo(
@@ -194,7 +295,7 @@ def write_yolo_labels(
 def prepare_yolo_eval_dataset(
     sequences: list[KittiSequence],
     out_dir: Path,
-    class_map: dict[str, int] = KITTI_TO_YOLO_ZEROSHOT,
+    class_map: dict[str, int] = KITTI_TO_COCO_ZEROSHOT,
     class_names: list[str] | None = None,
     split: str = "val",
 ) -> Path:
@@ -240,8 +341,20 @@ def prepare_yolo_eval_dataset(
     split_txt.write_text("\n".join(str(p.resolve()) for p in image_paths) + "\n")
 
     if class_names is None:
+        # Auto-derive a contiguous names list from class_map. Works only when
+        # class indices are contiguous starting at 0 (e.g., Car=0, Pedestrian=1
+        # for fine-tune). For sparse mappings like KITTI_TO_COCO_ZEROSHOT
+        # (Car=2, Pedestrian=0) the caller MUST pass class_names explicitly —
+        # typically COCO80_NAMES — so ultralytics has the full namespace.
         id_to_name = {v: k for k, v in class_map.items()}
-        class_names = [id_to_name[i] for i in sorted(id_to_name)]
+        max_id = max(id_to_name)
+        if set(id_to_name.keys()) != set(range(max_id + 1)):
+            raise ValueError(
+                f"class_map indices {sorted(id_to_name)} are not contiguous "
+                f"starting at 0; pass class_names explicitly. For zero-shot "
+                f"eval against a COCO-pretrained model, use COCO80_NAMES."
+            )
+        class_names = [id_to_name[i] for i in range(max_id + 1)]
 
     # ultralytics' check_det_dataset requires BOTH 'train' and 'val' keys in
     # data.yaml regardless of which mode is being run — see

@@ -15,6 +15,26 @@ COCO-pretrained model returns only ``person`` (0) and ``car`` (2),
 which are then remapped to KITTI's ``Pedestrian`` (1) and ``Car`` (0)
 in :func:`coco_to_kitti`. Cyclist is intentionally not handled here
 (see :mod:`tracking.data.yolo_format` for the rationale).
+
+Dual class-space design
+-----------------------
+There are TWO different KITTI -> integer mappings in play, and they
+serve different phases:
+
+* **Eval phase (``model.val()``)** uses
+  :data:`tracking.data.yolo_format.KITTI_TO_COCO_ZEROSHOT` so GT labels
+  live in COCO80 index space — the same space the COCO-pretrained model
+  predicts in. Without this, ``model.val()`` matches predictions and GT
+  by raw integer and most "matches" are coincidental IoU overlaps with
+  semantically different classes (the mAP ≈ 0 collapse seen on the
+  first run before this design was correct).
+* **MOT16 dump phase** uses :func:`coco_to_kitti` to remap COCO model
+  output (person=0, car=2) into KITTI tracker input space (Pedestrian=1,
+  Car=0) — that's what T5/T7 trackers and the eventual TrackEval
+  consumer expect.
+
+T4 will switch the eval phase to :data:`KITTI_TO_YOLO_FINETUNE` (a
+contiguous nc=2 space) once the model is retrained with KITTI heads.
 """
 
 from __future__ import annotations
@@ -29,7 +49,11 @@ import yaml
 from pydantic import BaseModel, Field
 
 from tracking.data.kitti import KittiSequence, KittiTrackingDataset
-from tracking.data.yolo_format import KITTI_TO_YOLO_ZEROSHOT, prepare_yolo_eval_dataset
+from tracking.data.yolo_format import (
+    COCO80_NAMES,
+    KITTI_TO_COCO_ZEROSHOT,
+    prepare_yolo_eval_dataset,
+)
 from tracking.detection.run_meta import (
     EvalSummary,
     RunMeta,
@@ -117,10 +141,18 @@ def _run_eval_phase(model: Any, data_yaml: Path, cfg: DetectorConfig) -> EvalSum
         device=cfg.device or None,
         verbose=False,
     )
-    per_class = {
-        name: float(value)
-        for name, value in zip(["Car", "Pedestrian"], metrics.box.maps, strict=False)
-    }
+    # In zero-shot mode the model has 80 COCO classes; only indices 0 (person
+    # = KITTI Pedestrian) and 2 (car = KITTI Car) carry any GT. Pull the mAP
+    # for those slots specifically and label them with their KITTI names.
+    maps = metrics.box.maps
+    per_class: dict[str, float] = {}
+    if len(maps) >= 3:
+        per_class["Pedestrian"] = float(maps[0])
+        per_class["Car"] = float(maps[2])
+    else:
+        # Fine-tune mode (nc=2): contiguous indices Car=0, Pedestrian=1.
+        per_class["Car"] = float(maps[0]) if len(maps) > 0 else 0.0
+        per_class["Pedestrian"] = float(maps[1]) if len(maps) > 1 else 0.0
     return EvalSummary(
         map50_95=float(metrics.box.map),
         map50=float(metrics.box.map50),
@@ -177,10 +209,14 @@ def run_detection(config_path: Path) -> None:
     set_seed(cfg.seed)
 
     val_ds = KittiTrackingDataset.from_split(cfg.dataset.root, cfg.dataset.val_sequences)
+    # Zero-shot eval: labels MUST be in COCO80 index space so that
+    # COCO-pretrained predictions (class 0=person, 2=car) match GT by class.
+    # T4 will switch to KITTI_TO_YOLO_FINETUNE + 2-class names list.
     data_yaml = prepare_yolo_eval_dataset(
         val_ds.sequences,
         cfg.dataset.yolo_eval_dir,
-        class_map=KITTI_TO_YOLO_ZEROSHOT,
+        class_map=KITTI_TO_COCO_ZEROSHOT,
+        class_names=COCO80_NAMES,
         split="val",
     )
 

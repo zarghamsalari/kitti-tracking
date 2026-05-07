@@ -26,6 +26,18 @@ KITTI image dimensions are **not uniform** across sequences. Empirically verifie
 
 **Implication for T4:** training-sequence YOLO label generation MUST call `write_yolo_labels(image_size=None)` so dimensions are read per-sequence via `_read_image_size()`. The hardcoded default would silently mis-normalise labels by 1–1.5% on a third of the training data, corrupting fine-tune targets. Same rule applies to T3b val labels.
 
+## Dual class-space design (post-implementation correction)
+
+The first manual run produced mAP ≈ 0.0002 — class-space mismatch between predictions (COCO indices) and GT labels (KITTI indices). The fix introduces two distinct mappings, each used in its right phase:
+
+| Mapping | Index space | Used by | Semantics |
+|---------|-------------|---------|-----------|
+| `KITTI_TO_COCO_ZEROSHOT` | COCO80 (Car=2, Ped=0) | T3b eval phase (`model.val()`) | GT labels match COCO-pretrained predictions for correct mAP |
+| `KITTI_TO_YOLO_FINETUNE` (a.k.a. `KITTI_TO_YOLO_ZEROSHOT`, alias kept) | KITTI 2-class (Car=0, Ped=1) | T4 fine-tune | Custom output head trained directly on KITTI |
+| `COCO_TO_KITTI` (in `tracking.detection.yolo`) | COCO → KITTI | T3b dump phase | Remap inference output to MOT16 rows for trackers |
+
+Eval `data.yaml` declares `nc: 80` with the full COCO names list (`COCO80_NAMES`) so ultralytics interprets indices correctly. Bug surfaced on first manual run; documented here so T4 doesn't redo the same mistake when it switches `data.yaml` to `nc: 2`.
+
 ## Implementation scope
 
 ### A. YOLO eval data layout

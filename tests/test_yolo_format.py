@@ -12,7 +12,10 @@ import yaml
 
 from tracking.data.kitti import KittiAnnotation, KittiSequence
 from tracking.data.yolo_format import (
+    COCO80_NAMES,
     KITTI_IMAGE_SIZE,
+    KITTI_TO_COCO_ZEROSHOT,
+    KITTI_TO_YOLO_FINETUNE,
     KITTI_TO_YOLO_ZEROSHOT,
     annotation_to_yolo_line,
     bbox_to_yolo,
@@ -181,8 +184,8 @@ def test_write_yolo_labels_fails_on_inconsistent_dims(tmp_path: Path) -> None:
         write_yolo_labels([seq], tmp_path / "out")
 
 
-def test_prepare_yolo_eval_dataset_layout(tmp_path: Path) -> None:
-    """End-to-end: prepare_yolo_eval_dataset materialises the full ultralytics layout."""
+def test_prepare_yolo_eval_dataset_zeroshot_uses_coco_indices(tmp_path: Path) -> None:
+    """T3b zero-shot path: labels in COCO80 index space + nc=80."""
     img_dir = tmp_path / "0001"
     img_dir.mkdir()
     img = np.zeros((50, 100, 3), dtype=np.uint8)
@@ -200,39 +203,95 @@ def test_prepare_yolo_eval_dataset_layout(tmp_path: Path) -> None:
     )
 
     out_dir = tmp_path / "yolo_dataset"
-    data_yaml = prepare_yolo_eval_dataset([seq], out_dir, split="val")
+    # Default uses KITTI_TO_COCO_ZEROSHOT — caller must pass COCO80_NAMES so
+    # auto-derivation doesn't blow up on sparse indices (Car=2, Ped=0).
+    data_yaml = prepare_yolo_eval_dataset([seq], out_dir, class_names=COCO80_NAMES, split="val")
 
-    # data.yaml at the returned path
     assert data_yaml == out_dir.resolve() / "data.yaml"
     assert data_yaml.is_file()
 
-    # Image files exist (hardlink or copy) under images/val/<seq>_<frame>.png
+    # Images materialised
     assert (out_dir / "images" / "val" / "0001_000000.png").is_file()
     assert (out_dir / "images" / "val" / "0001_000001.png").is_file()
 
-    # Label files exist with right content under labels/val/
+    # Labels use COCO indices: Car -> 2, Pedestrian -> 0
     label_0 = (out_dir / "labels" / "val" / "0001_000000.txt").read_text()
     label_1 = (out_dir / "labels" / "val" / "0001_000001.txt").read_text()
-    assert label_0.startswith("0 ")  # Car
-    assert "Cyclist" not in label_0  # filtered
-    assert label_1.startswith("1 ")  # Pedestrian
+    assert label_0.startswith("2 "), f"Car must use COCO index 2, got: {label_0[:5]!r}"
+    assert "Cyclist" not in label_0
+    assert label_1.startswith("0 "), f"Pedestrian must use COCO index 0, got: {label_1[:5]!r}"
 
     # val.txt lists absolute image paths
     val_txt = (out_dir / "val.txt").read_text().strip().split("\n")
     assert len(val_txt) == 2
     assert all(Path(p).is_absolute() for p in val_txt)
 
-    # data.yaml has the right keys
+    parsed = yaml.safe_load(data_yaml.read_text())
+    assert parsed["nc"] == 80, "Zero-shot eval needs the full COCO80 namespace"
+    assert parsed["names"][0] == "person"
+    assert parsed["names"][2] == "car"
+    assert parsed["path"] == str(out_dir.resolve())
+    # ultralytics' check_det_dataset requires BOTH train and val keys.
+    assert "train" in parsed
+    assert "val" in parsed
+    assert parsed["train"] == "val.txt"
+
+
+def test_prepare_yolo_eval_dataset_finetune_uses_kitti_indices(tmp_path: Path) -> None:
+    """T4 fine-tune path: contiguous KITTI 2-class indices auto-derived."""
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+
+    seq = KittiSequence(
+        name="0001",
+        image_dir=img_dir,
+        annotations=[_ann("Car", 10, 10, 30, 20, frame=0)],
+    )
+
+    out_dir = tmp_path / "yolo_dataset"
+    data_yaml = prepare_yolo_eval_dataset(
+        [seq], out_dir, class_map=KITTI_TO_YOLO_FINETUNE, split="val"
+    )
+
+    label = (out_dir / "labels" / "val" / "0001_000000.txt").read_text()
+    assert label.startswith("0 "), f"Car must use KITTI index 0 in fine-tune, got: {label[:5]!r}"
+
     parsed = yaml.safe_load(data_yaml.read_text())
     assert parsed["nc"] == 2
-    assert parsed["names"] == ["Car", "Pedestrian"]  # sorted by class id
-    assert parsed["val"] == "val.txt"
-    assert parsed["path"] == str(out_dir.resolve())
+    assert parsed["names"] == ["Car", "Pedestrian"]
 
-    # ultralytics' check_det_dataset requires BOTH 'train' and 'val' keys
-    # even for val-only runs. Both must be present; the inactive one is a
-    # no-op pointing at the active split's file. Regression guard for the
-    # bug surfaced on first manual run.
-    assert "train" in parsed, "data.yaml must contain 'train' key for ultralytics compat"
-    assert "val" in parsed, "data.yaml must contain 'val' key"
-    assert parsed["train"] == "val.txt"  # placeholder pointing at val list
+
+def test_prepare_yolo_eval_dataset_rejects_sparse_classmap_without_names(
+    tmp_path: Path,
+) -> None:
+    """Sparse class_map (e.g., COCO indices) without explicit names must fail loudly."""
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+    seq = KittiSequence(name="0001", image_dir=img_dir, annotations=[])
+
+    with pytest.raises(ValueError, match="not contiguous"):
+        prepare_yolo_eval_dataset(
+            [seq], tmp_path / "out", class_map=KITTI_TO_COCO_ZEROSHOT, split="val"
+        )
+
+
+def test_kitti_to_yolo_zeroshot_alias_matches_finetune() -> None:
+    """Back-compat: the old KITTI_TO_YOLO_ZEROSHOT name still works."""
+    assert KITTI_TO_YOLO_ZEROSHOT == KITTI_TO_YOLO_FINETUNE
+
+
+def test_kitti_to_coco_zeroshot_uses_coco_indices() -> None:
+    """Pinned constant test — guard against silent regressions of the
+    class-space fix that surfaced from the mAP=0.0002 collapse.
+
+    KITTI Car must map to COCO 'car' (index 2).
+    KITTI Pedestrian must map to COCO 'person' (index 0).
+    Anything else means the eval matches against the wrong class space again.
+    """
+    assert KITTI_TO_COCO_ZEROSHOT["Car"] == 2
+    assert KITTI_TO_COCO_ZEROSHOT["Pedestrian"] == 0
+    assert COCO80_NAMES[0] == "person"
+    assert COCO80_NAMES[2] == "car"
+    assert len(COCO80_NAMES) == 80
