@@ -40,14 +40,68 @@ Each numbered boundary below corresponds to the labels in the diagram above.
 
 ---
 
+## 🚨 Known issue: T3b detection dump is missing the class column
+
+> **The 32k MOT16 detection files produced by T3b are missing information that
+> T5 (ByteTrack) and T6 (TrackEval) both require.** This is the biggest
+> practical finding from writing this doc. Address as **Step 0a of T5** —
+> before any tracker integration code — by re-dumping detections in the
+> updated 11-column format below.
+
+### What's wrong
+
+T3b's [`detection_to_mot16_row`](../src/tracking/detection/yolo.py) writes a 10-column row:
+
+```
+frame, id, x, y, w, h, conf, -1, -1, -1
+```
+
+There's no slot for the per-detection class id. Both downstream consumers need it:
+
+- **ByteTrack** computes per-class association affinities. Without class, IDs can swap between cars and pedestrians.
+- **TrackEval** computes HOTA per class, then averages. Tracker output rows must declare `Car` or `Pedestrian` (boundary 4).
+
+### Resolution: re-dump in 11-column v2 format
+
+```
+frame, id, x, y, w, h, conf, class, -1, -1, -1
+```
+
+The new `class` column sits **at position 8**, between `conf` and the world-coordinate sentinels. Keeping the trailing `-1 -1 -1` intact preserves standard MOT16 column semantics (cols 9–11 = world x/y/z) — any downstream tool that expected 10-column MOT16 will fail loudly on the 11-column file rather than silently misreading a world-coordinate slot as class.
+
+`class` is the **KITTI** class id (`Car=0`, `Pedestrian=1`) — the value `KITTI_TO_YOLO_FINETUNE` would assign. T3b's runner already has the COCO id available before remap; just thread it through.
+
+### Cost of the fix
+
+- ~30 min to update `detection_to_mot16_row`, `_dump_mot16_for_sequence`, the existing tests asserting 10 columns, and bump `run_meta.json`'s `format_version` to `mot16-kitti-v2`
+- ~30 min to re-run `tracking detect` so the on-disk files match the new format (model + cache are warm; this is the second run, not the first)
+- T5 then writes its tracker-output files in the same 11-column shape
+
+Total: ~1 hour. Adds one good test (assert 11 columns and class column present in dump).
+
+### Why this slipped through T3b verification
+
+The verification checklist asked "is the format MOT16-shaped?" — yes, 10 columns matched the spec we documented. It did not ask "do downstream consumers (ByteTrack, TrackEval) need a column we didn't include?" The lesson is general: **verify a producer's output against its consumer's input requirements, not just against a format-spec name.** To be captured in CLAUDE.md alongside the T5-plan PR.
+
+### Alternative considered: parallel class file
+
+Sidecar `<seq>_classes.txt` per sequence with one class id per detection, in row-aligned order. Saves the re-dump but adds a "remember to load this other file" coupling forever. Rejected — the 1-hour re-dump cost is bounded; long-lived API smell isn't.
+
+---
+
 ## Boundary 1 — Detection dump (T3b output)
 
 **File**: `runs/det/yolov8m_zeroshot/<seq>.txt`, one per val sequence.
 
-**Format**: comma-separated, **10 columns**, one detection per row:
+> ⚠️ **Format is changing in T5 Step 0a.** The current on-disk files use the
+> v1 (10-column) format from T3b. After Step 0a's re-dump, they'll be the v2
+> (11-column) format documented below. See the **Known issue** section above
+> for cost + rationale.
+
+**Format (v2 — post-Step-0a)**: comma-separated, **11 columns**, one detection per row:
 
 ```
-frame, id, x, y, w, h, conf, -1, -1, -1
+frame, id, x, y, w, h, conf, class, -1, -1, -1
 ```
 
 | Column | Type | Meaning | Convention here |
@@ -59,38 +113,17 @@ frame, id, x, y, w, h, conf, -1, -1, -1
 | 5 | float | bbox width (px) | pixel space |
 | 6 | float | bbox height (px) | pixel space |
 | 7 | float | confidence | [0, 1], 4 decimal places, ≥ `dump_conf` (0.1) |
-| 8–10 | int | world coordinates | `-1, -1, -1` (N/A for 2D) |
+| 8 | int | **class id** (KITTI scheme) | **`0` = Car, `1` = Pedestrian** (`KITTI_TO_YOLO_FINETUNE` values) |
+| 9–11 | int | world coordinates x/y/z | `-1, -1, -1` (N/A for 2D) |
 
-**Sample row** (from `0001.txt`):
+**Format (v1 — currently on disk, deprecated)**: 10 columns, no class column. Format version is recorded in `run_meta.json`'s `format_version` field — consumers reject incompatible producers loudly.
+
+**Sample v2 row** (post-fix; for a Car detection):
 ```
-0,-1,789.15,187.08,442.00,184.19,0.9399,-1,-1,-1
+0,-1,789.15,187.08,442.00,184.19,0.9399,0,-1,-1,-1
 ```
 
 **Frame indexing**: zero-based, deliberately matching KITTI's convention (and consistent with [`tracking.data.kitti.annotations_to_mot16`](../src/tracking/data/kitti.py)). The wider MOT Challenge tooling assumes 1-indexed in some places — TrackEval's *KITTI* dataset reader expects 0-indexed and is what we use, so the convention holds end-to-end.
-
----
-
-## ⚠️ Boundary 1.5 — Class column gap (must address in T5)
-
-**T3b's detection dump does not carry the class id.** [`detection_to_mot16_row`](../src/tracking/detection/yolo.py) writes a 10-column row with `-1, -1, -1` in the trailing positions — no slot for class.
-
-This is a real problem for downstream consumers:
-
-- **ByteTrack via `boxmot`** expects `[x1, y1, x2, y2, conf, cls]` (boundary 2). Without class, all detections are treated as a single class and IDs can swap between cars and pedestrians.
-- **TrackEval's KITTI scope** requires the class name (`Car` / `Pedestrian`) in column 3 of each row (boundary 4). Without it, tracker output cannot be evaluated.
-
-### Two remediation options (T5 picks one)
-
-**Option A — Re-emit detections with class.** Modify `detection_to_mot16_row` and `_dump_mot16_for_sequence` to include the KITTI class id (Car=0, Pedestrian=1, per `KITTI_TO_YOLO_FINETUNE`). Choices for slot:
-- *A1*: Replace one of the trailing `-1` columns. Non-standard but minimal change. Format: `frame, id, x, y, w, h, conf, cls, -1, -1`.
-- *A2*: Add an 11th column. More explicit, but breaks the "exactly 10 columns" invariant our existing tests assert.
-- *A3*: Drop the trailing `-1, -1, -1` entirely (we don't use them) and append `cls`. Format: `frame, id, x, y, w, h, conf, cls`. Cleanest but most disruptive.
-
-**Option B — Parallel class state.** Keep the 10-column dump as-is. Maintain a sidecar `classes.txt` per sequence (one line per detection, in the same order). Tracker reads both. Cleaner separation, but needs careful row-alignment guarantees and doubles file count.
-
-**Recommendation for T5**: **Option A1** (replace trailing `-1`). Minimum disruption. Update existing tests to assert the new column. Re-run T3b once to regenerate detections with class — fast since model + cache are warm. Document the format change in the T3b dump's docstring and bump a "format version" string in `run_meta.json`.
-
-This is the only known format issue. The rest of the boundaries are well-defined.
 
 ---
 
@@ -173,13 +206,13 @@ The `cls` column is the missing piece flagged in Boundary 1.5.
 
 **Track id is per-tracker-instance, not global.** A new `BYTETracker` instance starts at id=1 for each sequence, so cross-sequence id collisions are normal and expected — TrackEval handles per-sequence eval correctly.
 
-**Writing back to MOT16**: same 10-column format as Boundary 1, plus class column per the Boundary 1.5 remediation:
+**Writing back to MOT16**: same 11-column v2 format as Boundary 1, with the tracker filling in the `track_id` column:
 
 ```
-frame, track_id, x1, y1, (x2-x1), (y2-y1), conf, cls, -1, -1
+frame, track_id, x1, y1, (x2-x1), (y2-y1), conf, cls, -1, -1, -1
 ```
 
-Output goes to `runs/track/bytetrack/<seq>.txt`. Frame index, xywh conversion, and 0-indexing all match Boundary 1.
+Output goes to `runs/track/bytetrack/<seq>.txt`. Frame index, xywh conversion, class column, and 0-indexing all match Boundary 1's v2 format. T7's BoT-SORT writes the same shape to `runs/track/botsort/<seq>.txt` — identical format for clean ablation.
 
 ---
 
@@ -313,8 +346,9 @@ T6 (TrackEval harness, separate task) handles boundaries 4 and 5 directly. T5 ju
 
 Implementations must record the format version they emit/consume. Suggested:
 
-- T3b detection dump: `format_version: "mot16-kitti-v1"` (10 columns, no class) — to be deprecated
-- T3b detection dump after fix: `format_version: "mot16-kitti-v2"` (10 columns, class in slot 8)
-- T5 tracker output: `format_version: "mot16-kitti-v2"` (same shape as v2 detections, with track ids filled)
+- T3b detection dump (current on-disk): `format_version: "mot16-kitti-v1"` — 10 columns, no class. **Deprecated by T5 Step 0a.**
+- T3b detection dump (post-Step-0a re-dump): `format_version: "mot16-kitti-v2"` — 11 columns, class id at slot 8, world-coord sentinels at slots 9–11.
+- T5 tracker output: `format_version: "mot16-kitti-v2"` — same 11-column shape as v2 detections, with track ids filled in slot 2.
+- T7 tracker output: `format_version: "mot16-kitti-v2"` — same.
 
-This goes in `run_meta.json` so consumers can reject incompatible producers loudly.
+This goes in `run_meta.json` so consumers can reject incompatible producers loudly. T5's tracker reader should refuse to load any file with `format_version != "mot16-kitti-v2"` — fail fast rather than silently misinterpret a missing column.
