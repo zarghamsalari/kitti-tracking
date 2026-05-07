@@ -21,7 +21,7 @@ format:
 	ruff check --fix src tests
 
 download:
-	bash scripts/download_kitti.sh
+	$(PY) scripts/download_kitti.py
 
 detect:
 	tracking detect --config configs/detector_yolov8.yaml
