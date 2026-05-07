@@ -228,3 +228,11 @@ def test_prepare_yolo_eval_dataset_layout(tmp_path: Path) -> None:
     assert parsed["names"] == ["Car", "Pedestrian"]  # sorted by class id
     assert parsed["val"] == "val.txt"
     assert parsed["path"] == str(out_dir.resolve())
+
+    # ultralytics' check_det_dataset requires BOTH 'train' and 'val' keys
+    # even for val-only runs. Both must be present; the inactive one is a
+    # no-op pointing at the active split's file. Regression guard for the
+    # bug surfaced on first manual run.
+    assert "train" in parsed, "data.yaml must contain 'train' key for ultralytics compat"
+    assert "val" in parsed, "data.yaml must contain 'val' key"
+    assert parsed["train"] == "val.txt"  # placeholder pointing at val list

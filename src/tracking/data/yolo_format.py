@@ -243,12 +243,20 @@ def prepare_yolo_eval_dataset(
         id_to_name = {v: k for k, v in class_map.items()}
         class_names = [id_to_name[i] for i in sorted(id_to_name)]
 
+    # ultralytics' check_det_dataset requires BOTH 'train' and 'val' keys in
+    # data.yaml regardless of which mode is being run — see
+    # https://github.com/ultralytics/ultralytics/blob/main/ultralytics/data/utils.py
+    # We always emit both; the inactive key points at the same image list as a
+    # no-op (ultralytics only reads the key matching the current mode). T4 will
+    # extend this to generate distinct train.txt and val.txt when fine-tuning.
+    split_path = f"{split}.txt"
     data_yaml = out_dir / "data.yaml"
     data_yaml.write_text(
         yaml.safe_dump(
             {
                 "path": str(out_dir),
-                split: f"{split}.txt",
+                "train": split_path,
+                "val": split_path,
                 "nc": len(class_names),
                 "names": class_names,
             },
