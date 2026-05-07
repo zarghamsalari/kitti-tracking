@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+from tracking.data.download import (
+    DEFAULT_TARGET_DIR,
+    KITTI_ARCHIVES,
+    KITTI_BASE_URL,
+    KittiArchive,
+    download_file,
+    download_kitti,
+    extract_zip,
+)
 from tracking.data.kitti import (
     KittiSequence,
     KittiTrackingDataset,
@@ -18,12 +27,19 @@ from tracking.data.yolo_format import (
 )
 
 __all__ = [
+    "DEFAULT_TARGET_DIR",
+    "KITTI_ARCHIVES",
+    "KITTI_BASE_URL",
     "KITTI_IMAGE_SIZE",
     "KITTI_TO_YOLO_ZEROSHOT",
+    "KittiArchive",
     "KittiSequence",
     "KittiTrackingDataset",
     "annotation_to_yolo_line",
     "bbox_to_yolo",
+    "download_file",
+    "download_kitti",
+    "extract_zip",
     "frame_yolo_labels",
     "load_sequence",
     "parse_label_file",
