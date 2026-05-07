@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
 from tracking.data.kitti import KittiAnnotation, KittiSequence
@@ -120,7 +122,8 @@ def test_write_yolo_labels_creates_one_file_per_frame(tmp_path: Path) -> None:
     )
 
     out_dir = tmp_path / "yolo_labels"
-    total = write_yolo_labels([seq], out_dir)
+    # Pass image_size explicitly — fixture PNGs are empty bytes, not real images.
+    total = write_yolo_labels([seq], out_dir, image_size=KITTI_IMAGE_SIZE)
 
     # One Car + one Pedestrian written; Cyclist filtered.
     assert total == 2
@@ -131,3 +134,46 @@ def test_write_yolo_labels_creates_one_file_per_frame(tmp_path: Path) -> None:
     assert (out_dir / "0000" / "000000.txt").read_text().startswith("0 ")  # Car
     assert (out_dir / "0000" / "000001.txt").read_text() == ""  # filtered Cyclist
     assert (out_dir / "0000" / "000002.txt").read_text().startswith("1 ")  # Pedestrian
+
+
+def test_write_yolo_labels_reads_per_sequence_dims(tmp_path: Path) -> None:
+    """When image_size=None, dims must be read from disk per sequence."""
+    img_dir = tmp_path / "0000"
+    img_dir.mkdir()
+    # 100x50 PNG — chosen so we can verify the normalisation matched it,
+    # not the canonical 1242x375 default.
+    img = np.zeros((50, 100, 3), dtype=np.uint8)
+    cv2.imwrite(str(img_dir / "000000.png"), img)
+    cv2.imwrite(str(img_dir / "000001.png"), img)
+
+    # Box at (10, 10)-(30, 20) in 100x50 -> cx=0.20, cy=0.30, w=0.20, h=0.20
+    seq = KittiSequence(
+        name="0000",
+        image_dir=img_dir,
+        annotations=[_ann("Car", 10, 10, 30, 20, frame=0)],
+    )
+
+    out_dir = tmp_path / "yolo_labels"
+    total = write_yolo_labels([seq], out_dir)  # image_size=None -> read from disk
+
+    assert total == 1
+    line = (out_dir / "0000" / "000000.txt").read_text().strip()
+    parts = line.split()
+    assert parts[0] == "0"
+    assert math.isclose(float(parts[1]), 0.20, abs_tol=1e-3)
+    assert math.isclose(float(parts[2]), 0.30, abs_tol=1e-3)
+    assert math.isclose(float(parts[3]), 0.20, abs_tol=1e-3)
+    assert math.isclose(float(parts[4]), 0.20, abs_tol=1e-3)
+
+
+def test_write_yolo_labels_fails_on_inconsistent_dims(tmp_path: Path) -> None:
+    """A sequence with mismatched frame dimensions must fail loudly."""
+    img_dir = tmp_path / "broken"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+    cv2.imwrite(str(img_dir / "000001.png"), np.zeros((60, 120, 3), dtype=np.uint8))  # different!
+
+    seq = KittiSequence(name="broken", image_dir=img_dir, annotations=[])
+
+    with pytest.raises(ValueError, match="inconsistent image dimensions"):
+        write_yolo_labels([seq], tmp_path / "out")
