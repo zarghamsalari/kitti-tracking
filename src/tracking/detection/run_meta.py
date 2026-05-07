@@ -53,6 +53,7 @@ class RunMeta:
     torch_version: str
     ultralytics_version: str
     eval: EvalSummary | None = None
+    format_version: str = "mot16-kitti-v1"
 
 
 def git_sha() -> str:

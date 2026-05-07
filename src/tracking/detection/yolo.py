@@ -86,14 +86,16 @@ def detection_to_mot16_row(
     w: float,
     h: float,
     conf: float,
+    cls: int,
     track_id: int = -1,
 ) -> str:
-    """One MOT16 row: ``frame,id,x,y,w,h,conf,-1,-1,-1``.
+    """One MOT16 v2 row: ``frame,id,x,y,w,h,conf,cls,-1,-1,-1`` (11 columns).
 
     Coordinates are top-left ``(x, y)`` with width/height in pixels.
+    ``cls`` is the KITTI class id (Car=0, Pedestrian=1).
     ``track_id`` is ``-1`` for raw detections (set by tracker downstream).
     """
-    return f"{frame},{track_id},{x:.2f},{y:.2f},{w:.2f},{h:.2f},{conf:.4f},-1,-1,-1"
+    return f"{frame},{track_id},{x:.2f},{y:.2f},{w:.2f},{h:.2f},{conf:.4f},{cls},-1,-1,-1"
 
 
 class DetectorConfig(BaseModel):
@@ -185,11 +187,14 @@ def _dump_mot16_for_sequence(
         for r in results:
             for box in r.boxes:
                 coco_class = int(box.cls)
-                if coco_to_kitti(coco_class) is None:
+                kitti_cls = coco_to_kitti(coco_class)
+                if kitti_cls is None:
                     continue
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 rows.append(
-                    detection_to_mot16_row(frame, x1, y1, x2 - x1, y2 - y1, float(box.conf))
+                    detection_to_mot16_row(
+                        frame, x1, y1, x2 - x1, y2 - y1, float(box.conf), kitti_cls
+                    )
                 )
     out_path.write_text("\n".join(rows) + ("\n" if rows else ""))
     return len(rows)
@@ -262,6 +267,7 @@ def run_detection(config_path: Path) -> None:
         torch_version=torch.__version__,
         ultralytics_version=ultralytics.__version__,
         eval=eval_summary,
+        format_version="mot16-kitti-v2",
     )
     write_run_meta(meta, cfg.output.det_dir / "run_meta.json")
     logger.info("Done. Outputs under %s", cfg.output.det_dir)
