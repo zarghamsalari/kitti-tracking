@@ -1,0 +1,95 @@
+# T3b plan — zero-shot YOLOv8m on KITTI val
+
+> Drafted 2026-05-06. Awaiting review before implementation.
+
+## Context
+First real ML inference of the project. Run YOLOv8m COCO-pretrained on the 5 val sequences. Two artifacts: per-class mAP (writeup material), and MOT16-format detections (T5/T7 tracker input — the *fixed* input that makes the ablation clean). No fine-tuning yet — that's T4.
+
+## Locked design decisions
+1. `ultralytics` cache stays at `~/.config/Ultralytics/` (Windows: `%APPDATA%\Ultralytics\`) — verify outside repo/venv before first run
+2. `imgsz=1280` everywhere — KITTI's small distant objects need it; speed cost is acceptable
+3. Two pipelines from one model: `model.val()` for mAP, separate `model(image)` loop for MOT16 dumps
+4. `conf=0.1` for MOT dumps (NOT 0.5) — preserves ByteTrack's low-conf differentiator. `conf=0.001` for `model.val()` (mAP needs the full PR curve)
+
+## Implementation scope
+
+### A. YOLO eval data layout
+ultralytics needs a YOLOv8 dataset structure:
+```
+data/yolo_kitti/
+├── data.yaml                       # paths + class names
+├── images/val/<seq>_<frame>.png    # symlinked from data/kitti_tracking/training/image_02/
+└── labels/val/<seq>_<frame>.txt    # written via existing write_yolo_labels (T3a)
+```
+New helper in `src/tracking/data/yolo_format.py` (extends T3a): `prepare_yolo_eval_dataset(sequences, root_in, root_out)` — symlinks images and writes labels with `<seq>_<frame>` flattened naming (ultralytics doesn't traverse subdirs by default).
+
+### B. Detection runner — fill in `src/tracking/detection/yolo.py`
+Currently `NotImplementedError`. Replace with:
+- Load config (pydantic model)
+- `set_seed(seed)` for determinism
+- Build YOLO model from config (default `yolov8m.pt`)
+- **Phase 1 — eval:** `model.val(data=data_yaml, imgsz=1280, conf=0.001, iou=0.5)` → keep `metrics.box.map`, `metrics.box.maps[c]` per class
+- **Phase 2 — MOT16 dump:** for each val sequence, for each frame, `model(image_path, imgsz=1280, conf=0.1, classes=[0, 2])` (COCO person + car only, drops everything else at the model level). Convert results to MOT16 rows applying class remap `{2: 0 (Car), 0: 1 (Pedestrian)}`. Write `runs/det/yolov8m_zeroshot/<seq>.txt`
+- Write `runs/det/yolov8m_zeroshot/run_meta.json` with: git SHA, config hash, ultralytics version, torch version, model checksum, seed, timestamp, eval mAP per class
+
+### C. Config — `configs/detector_yolov8.yaml`
+Already exists; need to read and extend if needed. Expected shape:
+```yaml
+detector:
+  name: yolov8m
+  weights: yolov8m.pt        # ultralytics will download
+  imgsz: 1280
+  val_conf: 0.001
+  dump_conf: 0.1
+  iou: 0.5
+  classes: [0, 2]            # COCO person, car
+data:
+  root: data/kitti_tracking
+  val_seqs: ["0001", "0006", "0013", "0017", "0019"]
+  yolo_eval_dir: data/yolo_kitti
+output:
+  det_dir: runs/det/yolov8m_zeroshot
+seed: 42
+```
+Pydantic model in `src/tracking/detection/yolo.py` to validate this.
+
+### D. Tests (CI-runnable, no model download)
+- `test_coco_to_kitti_remap`: COCO indices 0/2/16/3 → expected outputs (only 0,2 kept; remapped to 1,0)
+- `test_mot16_row_format`: one detection → 10-column space-separated row matches MOT16 spec
+- `test_dump_writes_per_seq_files`: with a fake "model" that returns canned boxes, confirm one `.txt` per sequence with right content
+- The actual end-to-end `model.val()` and inference runs are excluded — too heavy for CI. Mark heavy tests `@pytest.mark.slow`.
+
+### E. Manual verification (after merge)
+```powershell
+.\.venv\Scripts\tracking.exe detect --config configs/detector_yolov8.yaml
+```
+Expected:
+- ~50 MB weights download on first run only
+- `runs/det/yolov8m_zeroshot/{0001,0006,0013,0017,0019}.txt` exist, each with detection rows
+- `run_meta.json` shows car mAP roughly in the 0.45–0.60 range
+- pedestrian mAP lower (KITTI pedestrians are tiny — this is the headline finding that motivates fine-tuning in T4)
+
+## Critical files
+- `src/tracking/detection/yolo.py` — fill in (currently stub)
+- `src/tracking/data/yolo_format.py` — extend with `prepare_yolo_eval_dataset`
+- `configs/detector_yolov8.yaml` — read existing, adjust
+- `tests/test_detection_yolo.py` — new
+- `pyproject.toml` — verify `ultralytics>=8.1` is there
+
+## Risks / things to watch
+- **Image dimensions vary across KITTI seqs** — most are 1242×375 but a few sequences are slightly different. Read `cv2.imread().shape` per sequence's first frame; update `write_yolo_labels` signature to take per-sequence sizes
+- **Pedestrian mAP will be embarrassing** — that's not a bug, that's the writeup material
+- **First run is slow** — weights download + model warm-up
+- **`runs/` is in `.gitignore`** — already verified
+
+## Estimated effort
+1.5–2 hours of focused work. Larger than T3a because of the ultralytics eval-data plumbing and the dual-pipeline design.
+
+## Branch + PR
+- Branch: `t3b-zeroshot-yolov8m`
+- PR title: `feat(detect): YOLOv8m zero-shot inference + mAP eval (T3b)`
+
+## Open iteration points
+- Should the COCO class filter happen at the model level (`classes=[0, 2]`) or post-hoc? Lean model-level — faster, simpler
+- The image-size-per-sequence change will touch T3a code — fine but worth flagging
+- Anything to exclude from this PR (e.g., split mAP and MOT dump into T3b1/T3b2)?
