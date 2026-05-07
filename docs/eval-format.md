@@ -15,8 +15,8 @@
 > |---|---|
 > | 1 — T3b detection dump | ✅ Verified by manual run + tests |
 > | 1.5 — Class column gap | ✅ Identified; remediation pending |
-> | 2 — ByteTrack input (boxmot) | ⚠️ **Working assumption — verify in T5 Step 0 before code** |
-> | 3 — ByteTrack output (boxmot) | ⚠️ **Working assumption — verify in T5 Step 0 before code** |
+> | 2 — ByteTrack input (boxmot) | ✅ Verified against boxmot 18.0.0 source (Step 0b) |
+> | 3 — ByteTrack output (boxmot) | ✅ Verified against boxmot 18.0.0 source (Step 0b) |
 > | 4 — TrackEval input (KITTI 2D) | ⚠️ Working assumption from TrackEval docs — verify in T6 |
 > | 5 — TrackEval GT (KITTI 2D) | ⚠️ Working assumption — verify in T6 |
 >
@@ -129,32 +129,34 @@ frame, id, x, y, w, h, conf, class, -1, -1, -1
 
 ## Boundary 2 — ByteTrack input (boxmot)
 
-> **⚠️ STATUS: Working assumption. Verify in T5 Step 0.**
->
-> The shapes and conventions below are my best reading of boxmot's documented
-> API at version 11.x, but the project hasn't installed boxmot yet. T5's first
-> implementation step ("Step 0") is to install the pinned version, read the
-> `BYTETracker.update()` source, and update this section with verified
-> specifics — including answering:
->
-> 1. **Column convention**: does `update()` want `[x1, y1, x2, y2, conf, cls]`
->    (xyxy) or `[x, y, w, h, conf, cls]` (xywh)?
-> 2. **Frame indexing**: implicit (caller passes one frame at a time) or
->    explicit (frame number is part of the input)?
-> 3. **Return shape**: tracks-active-this-frame, or all-tracks-ever-seen?
->
-> Until Step 0 lands, **do not write tracker integration code against the
-> assumptions below.**
+> **✅ STATUS: Verified against boxmot 18.0.0 source (Step 0b).** All three
+> working assumptions confirmed. Pin `boxmot==18.0.0` in pyproject.toml.
 
 **Library**: `boxmot.BYTETracker` (and similarly `boxmot.BoTSORT` for T7).
+**Verified version**: 18.0.0 (latest stable on PyPI as of 2026-05-07).
 
-**Per-frame call** (assumed):
+**Constructor** (verified from source):
 ```python
-tracker = BYTETracker(track_thresh=..., match_thresh=..., track_buffer=...)
+tracker = BYTETracker(
+    track_thresh=0.45,   # confidence threshold for high-conf detections
+    match_thresh=0.8,    # IoU threshold for track-to-detection matching
+    track_buffer=25,     # frames a lost track survives before deletion
+    frame_rate=30,       # used by Kalman filter time normalisation
+    min_conf=0.1,        # minimum confidence for low-conf detections
+)
+```
+
+**Per-frame call** (verified):
+```python
 tracks = tracker.update(dets, img)
 ```
 
-**Detection input shape**: numpy `ndarray` of dtype `float32`, shape `(N, 6)`:
+No frame number argument — frame indexing is **implicit**. The tracker
+maintains `self.frame_count` internally, incrementing on each `update()` call.
+Caller just calls once per frame in sequence.
+
+**Detection input shape** (verified): numpy `ndarray` of dtype `float32`,
+shape `(N, 6)`:
 
 ```
 [[x1, y1, x2, y2, conf, cls], ...]
@@ -162,49 +164,98 @@ tracks = tracker.update(dets, img)
 
 | Column | Meaning |
 |--------|---------|
-| 0–3 | bbox in **xyxy** (top-left + bottom-right pixel coords) — note: **not** xywh |
+| 0–3 | bbox in **xyxy** (top-left + bottom-right pixel coords) — **not** xywh |
 | 4 | confidence ∈ [0, 1] |
-| 5 | class id (int as float) |
+| 5 | class id (int stored as float) |
+
+boxmot auto-detects the format via `infer_detection_layout(dets)` on the first
+frame — no explicit format flag needed.
 
 **Conversion from boundary 1**:
 
 ```python
-# Our dump has frame, id, x, y, w, h, conf — we need xyxy + cls
-x1, y1 = x, y
+# v2 dump row: frame, id, x, y, w, h, conf, cls, -1, -1, -1
+# ByteTrack needs: x1, y1, x2, y2, conf, cls  (xyxy, no frame/id/sentinels)
 x2, y2 = x + w, y + h
 det_array = np.array([[x1, y1, x2, y2, conf, cls], ...], dtype=np.float32)
 ```
 
-The `cls` column is the missing piece flagged in Boundary 1.5.
+**The `img` argument** is the actual frame as a numpy array (HWC BGR uint8).
+ByteTrack ignores it (used by BoT-SORT for camera motion compensation). Pass
+`cv2.imread(frame_path)` regardless.
 
-**The `img` argument** is the actual frame as a numpy array (HWC BGR uint8). Used by some tracker implementations (BoT-SORT) for camera motion compensation; ByteTrack ignores it. We pass `cv2.imread(frame_path)`.
+**Empty-frame handling** (verified): calling `update(np.empty((0, 6), dtype=np.float32), img)`
+on a frame with zero detections does **not** crash. The frame counter still
+advances (`self.frame_count += 1`), existing tracks move to "lost" state, and
+the return value is an empty float32 array (0 active tracks). T5 must call
+`update()` for every frame — including zero-detection frames — to keep the
+internal frame counter and Kalman state consistent.
 
-**Note on `boxmot` API stability**: API exact shapes should be verified against the installed version's source before T5 code lands. Pin `boxmot>=11.0,<12.0` in pyproject.toml to avoid silent breakage on minor releases.
+**Multi-class tracking semantics** (verified): `per_class=False` is the
+default inherited from `BaseTracker`. With `per_class=False`, all classes are
+processed in a single tracker instance — a Car detection *can* be matched to a
+Pedestrian track if their IoU exceeds `match_thresh`. For our pipeline
+(Car + Pedestrian, KITTI), **use `per_class=True`** to prevent cross-class ID
+swaps. When `per_class=True`, boxmot runs one independent track buffer per
+class; track IDs are still per-sequence-instance but never cross class
+boundaries.
+
+**`frame_rate` is NOT documentation — it directly scales `max_time_lost`**
+(verified from source, line 243):
+
+```python
+self.buffer_size = int(frame_rate / 30.0 * track_buffer)
+self.max_time_lost = self.buffer_size
+```
+
+This normalises `track_buffer` from "frames at 30 FPS" to actual wall-clock
+duration. **KITTI runs at 10 FPS; leaving `frame_rate=30` (the default) causes
+tracks to stay "lost" for 2.5 s instead of the intended ~0.83 s:**
+
+| `frame_rate` | `track_buffer` | `buffer_size` | At 10 FPS |
+|---|---|---|---|
+| 30 (default — wrong for KITTI) | 25 | 25 frames | 2.5 s — too long |
+| 10 (correct for KITTI) | 25 | 8 frames | 0.8 s — matches intent |
+
+**Always pass `frame_rate=10` when using boxmot on KITTI sequences.**
+
+**BaseTracker defaults** (inherited via `**kwargs`, verified from source):
+`det_thresh=0.3`, `max_age=30`, `max_obs=50`, `min_hits=3`,
+`iou_threshold=0.3`, `nr_classes=80`, `asso_func="iou"`, `is_obb=False`.
+These are the values used when `BYTETracker()` is called with no kwargs. T5
+config should set `per_class=True`, `nr_classes=2` (Car + Pedestrian only),
+and `frame_rate=10` (KITTI FPS).
 
 ---
 
 ## Boundary 3 — ByteTrack output (boxmot)
 
-> **⚠️ STATUS: Working assumption. Verify in T5 Step 0.** Return shape and
-> column order are taken from boxmot's README at the time of writing; pin to
-> a tested version (Refinement 2 in the T5 plan) and update this section
-> after reading source.
+> **✅ STATUS: Verified against boxmot 18.0.0 source (Step 0b).** Shape,
+> column order, and active-tracks-only behaviour all confirmed.
 
-`tracker.update(dets, img)` returns a numpy `ndarray` of dtype `float32`, shape `(M, 8)` (M ≤ N — only currently-active tracks):
+`tracker.update(dets, img)` returns a numpy `ndarray` of dtype `float32`,
+shape `(M, 8)` where M = number of currently-active tracks (M ≤ N):
 
 ```
-[[x1, y1, x2, y2, track_id, conf, cls, det_index], ...]
+[[x1, y1, x2, y2, track_id, conf, cls, det_ind], ...]
 ```
 
 | Column | Meaning |
 |--------|---------|
-| 0–3 | bbox in xyxy (smoothed by Kalman if applicable) |
-| 4 | track id (1-indexed; tracker assigns) |
+| 0–3 | bbox in xyxy (Kalman-smoothed) |
+| 4 | track id (assigned by tracker, starts at 1 per instance) |
 | 5 | confidence (carried through from input) |
-| 6 | class id |
-| 7 | original detection index in the input array (or -1 if interpolated) |
+| 6 | class id (carried through from input) |
+| 7 | original detection index in the input array (`det_ind`) |
 
-**Track id is per-tracker-instance, not global.** A new `BYTETracker` instance starts at id=1 for each sequence, so cross-sequence id collisions are normal and expected — TrackEval handles per-sequence eval correctly.
+**Active tracks only** — verified from source: output assembles
+`[t for t in self.active_tracks if t.is_activated]`. Tracks that were lost
+this frame are excluded. If no tracks are active, returns an empty float32
+array (0 rows × 8 cols).
+
+**Track id is per-tracker-instance, not global.** A new `BYTETracker`
+instance starts at id=1 for each sequence, so cross-sequence id collisions are
+normal — TrackEval handles per-sequence eval correctly.
 
 **Writing back to MOT16**: same 11-column v2 format as Boundary 1, with the tracker filling in the `track_id` column:
 
@@ -330,8 +381,8 @@ name
 
 When implementing T5, the implementation must:
 
-- [ ] Address Boundary 1.5 (class column) — pick option A1, A2, A3, or B and document
-- [ ] Read MOT16 from boundary 1 with the right column count
+- [x] Address Boundary 1.5 (class column) — re-dumped in v2 11-column format (Step 0a)
+- [ ] Read MOT16 from boundary 1 with the right column count (11 cols, cls at parts[7])
 - [ ] Convert xywh → xyxy at boundary 2
 - [ ] Reset tracker state between sequences (independent track id streams)
 - [ ] Convert xyxy → xywh at boundary 3 when writing back
