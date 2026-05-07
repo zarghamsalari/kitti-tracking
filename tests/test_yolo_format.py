@@ -262,10 +262,14 @@ def test_prepare_yolo_eval_dataset_finetune_uses_kitti_indices(tmp_path: Path) -
     assert parsed["names"] == ["Car", "Pedestrian"]
 
 
-def test_prepare_yolo_eval_dataset_rejects_sparse_classmap_without_names(
+def test_prepare_yolo_eval_dataset_rejects_unknown_sparse_classmap(
     tmp_path: Path,
 ) -> None:
-    """Sparse class_map (e.g., COCO indices) without explicit names must fail loudly."""
+    """Unknown sparse class_map without explicit names must fail loudly.
+
+    The COCO preset is auto-recognised (see the bare-default test below);
+    only genuinely unknown sparse mappings should trigger the guard.
+    """
     img_dir = tmp_path / "0001"
     img_dir.mkdir()
     cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
@@ -273,8 +277,44 @@ def test_prepare_yolo_eval_dataset_rejects_sparse_classmap_without_names(
 
     with pytest.raises(ValueError, match="not contiguous"):
         prepare_yolo_eval_dataset(
-            [seq], tmp_path / "out", class_map=KITTI_TO_COCO_ZEROSHOT, split="val"
+            [seq],
+            tmp_path / "out",
+            class_map={"Foo": 5, "Bar": 9},  # genuinely unknown sparse
+            split="val",
         )
+
+
+def test_prepare_yolo_eval_dataset_default_call_path_works(tmp_path: Path) -> None:
+    """Bare-default call must produce a working data.yaml end-to-end.
+
+    Regression guard: the function previously raised ValueError on a bare
+    call because the COCO preset is sparse (Car=2, Pedestrian=0) and the
+    auto-derive guard fired before preset recognition. Now the preset is
+    recognised by identity and class_names auto-fills to COCO80_NAMES.
+
+    This test exercises the API as real callers use it — no kwargs at all.
+    Tests that always pass kwargs miss bugs in the default values themselves.
+    """
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+    seq = KittiSequence(
+        name="0001",
+        image_dir=img_dir,
+        annotations=[_ann("Car", 10, 10, 30, 20, frame=0)],
+    )
+
+    # No kwargs except the two required positional args.
+    data_yaml = prepare_yolo_eval_dataset([seq], tmp_path / "out")
+
+    assert data_yaml.exists()
+    parsed = yaml.safe_load(data_yaml.read_text())
+    assert parsed["nc"] == 80
+    assert parsed["names"][0] == "person"
+    assert parsed["names"][2] == "car"
+    # The label for the Car annotation should use COCO index 2.
+    label = (tmp_path / "out" / "labels" / "val" / "0001_000000.txt").read_text()
+    assert label.startswith("2 "), f"Default-path Car must use COCO index 2, got: {label[:5]!r}"
 
 
 def test_kitti_to_yolo_zeroshot_alias_matches_finetune() -> None:

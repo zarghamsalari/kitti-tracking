@@ -314,6 +314,33 @@ def prepare_yolo_eval_dataset(
     ever violated.
 
     Returns the path to ``data.yaml``, which is what ``ultralytics`` wants.
+
+    Examples:
+        Zero-shot eval against a COCO-pretrained model (T3b)::
+
+            prepare_yolo_eval_dataset(sequences, Path("data/yolo_eval"))
+
+        The COCO preset is auto-recognised — no need to pass ``class_names``.
+
+        Fine-tune eval against a KITTI-trained 2-class model (T4)::
+
+            prepare_yolo_eval_dataset(
+                sequences, Path("data/yolo_finetune_eval"),
+                class_map=KITTI_TO_YOLO_FINETUNE,
+            )
+
+        Contiguous indices auto-derive their names from ``class_map`` keys.
+
+        Explicit class space (override path)::
+
+            prepare_yolo_eval_dataset(
+                sequences, Path("data/custom_eval"),
+                class_map={"Truck": 0, "Car": 1},
+                class_names=["Truck", "Car"],
+            )
+
+        Sparse custom map without ``class_names`` raises ``ValueError`` to
+        prevent silent namespace drift in ``ultralytics``' eval pipeline.
     """
     out_dir = out_dir.resolve()
     images_dir = out_dir / "images" / split
@@ -341,20 +368,29 @@ def prepare_yolo_eval_dataset(
     split_txt.write_text("\n".join(str(p.resolve()) for p in image_paths) + "\n")
 
     if class_names is None:
-        # Auto-derive a contiguous names list from class_map. Works only when
-        # class indices are contiguous starting at 0 (e.g., Car=0, Pedestrian=1
-        # for fine-tune). For sparse mappings like KITTI_TO_COCO_ZEROSHOT
-        # (Car=2, Pedestrian=0) the caller MUST pass class_names explicitly —
-        # typically COCO80_NAMES — so ultralytics has the full namespace.
-        id_to_name = {v: k for k, v in class_map.items()}
-        max_id = max(id_to_name)
-        if set(id_to_name.keys()) != set(range(max_id + 1)):
-            raise ValueError(
-                f"class_map indices {sorted(id_to_name)} are not contiguous "
-                f"starting at 0; pass class_names explicitly. For zero-shot "
-                f"eval against a COCO-pretrained model, use COCO80_NAMES."
-            )
-        class_names = [id_to_name[i] for i in range(max_id + 1)]
+        # Recognise the COCO zero-shot preset by identity (the imported
+        # constant or its default-arg value) so bare-default calls work
+        # end-to-end. Identity-only — anyone reconstructing the dict
+        # literally has explicitly chosen non-default behaviour and should
+        # pass class_names themselves.
+        if class_map is KITTI_TO_COCO_ZEROSHOT:
+            class_names = COCO80_NAMES
+        else:
+            # Auto-derive a contiguous names list from class_map. Works
+            # only when indices are contiguous starting at 0 (e.g., Car=0,
+            # Pedestrian=1 for fine-tune). Sparse custom maps must pass
+            # class_names explicitly.
+            id_to_name = {v: k for k, v in class_map.items()}
+            max_id = max(id_to_name)
+            if set(id_to_name.keys()) != set(range(max_id + 1)):
+                raise ValueError(
+                    f"class_map indices {sorted(id_to_name)} are not "
+                    f"contiguous starting at 0; pass class_names explicitly. "
+                    f"For zero-shot eval against a COCO-pretrained model, "
+                    f"use the KITTI_TO_COCO_ZEROSHOT preset (auto-recognised) "
+                    f"or pass COCO80_NAMES directly."
+                )
+            class_names = [id_to_name[i] for i in range(max_id + 1)]
 
     # ultralytics' check_det_dataset requires BOTH 'train' and 'val' keys in
     # data.yaml regardless of which mode is being run — see
