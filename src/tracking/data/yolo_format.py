@@ -23,21 +23,125 @@ merged concept directly.
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 
 import cv2
+import yaml
 
 from tracking.data.kitti import KittiAnnotation, KittiSequence
 
-KITTI_TO_YOLO_ZEROSHOT: dict[str, int] = {
+# KITTI -> 2-class YOLO mapping for fine-tune (T4). The output head will be
+# rebuilt with nc=2 during fine-tuning, so we use a contiguous [0, 1] space.
+KITTI_TO_YOLO_FINETUNE: dict[str, int] = {
     "Car": 0,
     "Pedestrian": 1,
 }
+
+# KITTI -> COCO80 mapping for zero-shot eval (T3b). The COCO-pretrained model
+# emits predictions in COCO index space; for ``model.val()`` to match
+# predictions to ground truth by class, GT labels must use the SAME indices.
+KITTI_TO_COCO_ZEROSHOT: dict[str, int] = {
+    "Car": 2,  # COCO 'car'
+    "Pedestrian": 0,  # COCO 'person'
+}
+
+# Back-compat alias so external code that imported KITTI_TO_YOLO_ZEROSHOT
+# (from T3a, before the zero-shot vs fine-tune distinction was clear) still
+# resolves. Prefer the explicit names above for new code.
+KITTI_TO_YOLO_ZEROSHOT = KITTI_TO_YOLO_FINETUNE
 
 # Canonical KITTI image size — actual dims are read per-sequence in
 # write_yolo_labels (see _read_image_size). Kept here for fixtures, docs,
 # and the optional override path of write_yolo_labels.
 KITTI_IMAGE_SIZE: tuple[int, int] = (1242, 375)
+
+# Standard COCO80 class names — emitted in the order the COCO-pretrained
+# YOLOv8 model uses internally. Required in data.yaml when running
+# zero-shot eval, so ultralytics knows what each class index means.
+COCO80_NAMES: list[str] = [
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
+]
 
 
 def bbox_to_yolo(
@@ -141,6 +245,21 @@ def _read_image_size(seq: KittiSequence) -> tuple[int, int]:
     return (w, h)
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hardlink ``src`` to ``dst`` if possible, else copy.
+
+    Hardlinks are zero-cost on disk and work on Windows NTFS without
+    admin/dev mode (unlike symlinks). Cross-volume hardlinks fail, in
+    which case we fall back to a regular copy.
+    """
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 def write_yolo_labels(
     sequences: list[KittiSequence],
     out_dir: Path,
@@ -171,3 +290,127 @@ def write_yolo_labels(
             (seq_out / f"{frame:06d}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
             total_lines += len(lines)
     return total_lines
+
+
+def prepare_yolo_eval_dataset(
+    sequences: list[KittiSequence],
+    out_dir: Path,
+    class_map: dict[str, int] = KITTI_TO_COCO_ZEROSHOT,
+    class_names: list[str] | None = None,
+    split: str = "val",
+) -> Path:
+    """Materialise sequences as a YOLOv8 dataset for ``ultralytics`` eval.
+
+    Layout produced::
+
+        out_dir/
+        |- data.yaml
+        |- <split>.txt              # absolute image paths, one per line
+        |- images/<split>/<seq>_<frame>.png   # hardlinks (or copies)
+        |- labels/<split>/<seq>_<frame>.txt   # YOLO-format labels
+
+    Image dimensions are read per-sequence via :func:`_read_image_size`,
+    which fails loudly if the within-sequence consistency invariant is
+    ever violated.
+
+    Returns the path to ``data.yaml``, which is what ``ultralytics`` wants.
+
+    Examples:
+        Zero-shot eval against a COCO-pretrained model (T3b)::
+
+            prepare_yolo_eval_dataset(sequences, Path("data/yolo_eval"))
+
+        The COCO preset is auto-recognised — no need to pass ``class_names``.
+
+        Fine-tune eval against a KITTI-trained 2-class model (T4)::
+
+            prepare_yolo_eval_dataset(
+                sequences, Path("data/yolo_finetune_eval"),
+                class_map=KITTI_TO_YOLO_FINETUNE,
+            )
+
+        Contiguous indices auto-derive their names from ``class_map`` keys.
+
+        Explicit class space (override path)::
+
+            prepare_yolo_eval_dataset(
+                sequences, Path("data/custom_eval"),
+                class_map={"Truck": 0, "Car": 1},
+                class_names=["Truck", "Car"],
+            )
+
+        Sparse custom map without ``class_names`` raises ``ValueError`` to
+        prevent silent namespace drift in ``ultralytics``' eval pipeline.
+    """
+    out_dir = out_dir.resolve()
+    images_dir = out_dir / "images" / split
+    labels_dir = out_dir / "labels" / split
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    image_paths: list[Path] = []
+    for seq in sequences:
+        img_w, img_h = _read_image_size(seq)
+        for frame in range(seq.num_frames):
+            src = seq.image_dir / f"{frame:06d}.png"
+            if not src.exists():
+                continue
+
+            stem = f"{seq.name}_{frame:06d}"
+            target_img = images_dir / f"{stem}.png"
+            _link_or_copy(src, target_img)
+            image_paths.append(target_img)
+
+            lines = frame_yolo_labels(seq, frame, class_map, img_w, img_h)
+            (labels_dir / f"{stem}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
+
+    split_txt = out_dir / f"{split}.txt"
+    split_txt.write_text("\n".join(str(p.resolve()) for p in image_paths) + "\n")
+
+    if class_names is None:
+        # Recognise the COCO zero-shot preset by identity (the imported
+        # constant or its default-arg value) so bare-default calls work
+        # end-to-end. Identity-only — anyone reconstructing the dict
+        # literally has explicitly chosen non-default behaviour and should
+        # pass class_names themselves.
+        if class_map is KITTI_TO_COCO_ZEROSHOT:
+            class_names = COCO80_NAMES
+        else:
+            # Auto-derive a contiguous names list from class_map. Works
+            # only when indices are contiguous starting at 0 (e.g., Car=0,
+            # Pedestrian=1 for fine-tune). Sparse custom maps must pass
+            # class_names explicitly.
+            id_to_name = {v: k for k, v in class_map.items()}
+            max_id = max(id_to_name)
+            if set(id_to_name.keys()) != set(range(max_id + 1)):
+                raise ValueError(
+                    f"class_map indices {sorted(id_to_name)} are not "
+                    f"contiguous starting at 0; pass class_names explicitly. "
+                    f"For zero-shot eval against a COCO-pretrained model, "
+                    f"use the KITTI_TO_COCO_ZEROSHOT preset (auto-recognised) "
+                    f"or pass COCO80_NAMES directly."
+                )
+            class_names = [id_to_name[i] for i in range(max_id + 1)]
+
+    # ultralytics' check_det_dataset requires BOTH 'train' and 'val' keys in
+    # data.yaml regardless of which mode is being run — see
+    # https://github.com/ultralytics/ultralytics/blob/main/ultralytics/data/utils.py
+    # We always emit both; the inactive key points at the same image list as a
+    # no-op (ultralytics only reads the key matching the current mode). T4 will
+    # extend this to generate distinct train.txt and val.txt when fine-tuning.
+    split_path = f"{split}.txt"
+    data_yaml = out_dir / "data.yaml"
+    data_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "path": str(out_dir),
+                "train": split_path,
+                "val": split_path,
+                "nc": len(class_names),
+                "names": class_names,
+            },
+            sort_keys=False,
+        )
+    )
+
+    return data_yaml

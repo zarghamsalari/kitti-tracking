@@ -117,6 +117,7 @@ Update the boxes above as work progresses. Each task → one feature branch → 
 - Tests must NOT require GPU, network, or KITTI download. Mock or use 1–2 frame fixtures.
 - `pytest -m slow` for any test that needs real data — excluded from CI.
 - Coverage target: 70% on `src/tracking/{data,eval}/` (the parts where bugs cause silent metric inflation).
+- **Test the default call path.** When a function has defaulted arguments, write at least one test that calls it with no kwargs (`fn(required_arg)`) and asserts success. Tests that always pass kwargs miss bugs in the default values themselves.
 
 ### Metrics discipline
 - Primary metric: **HOTA**. Report MOTA and IDF1 alongside but never as headline.

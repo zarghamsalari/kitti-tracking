@@ -18,19 +18,26 @@ from tracking.data.kitti import (
     parse_label_file,
 )
 from tracking.data.yolo_format import (
+    COCO80_NAMES,
     KITTI_IMAGE_SIZE,
+    KITTI_TO_COCO_ZEROSHOT,
+    KITTI_TO_YOLO_FINETUNE,
     KITTI_TO_YOLO_ZEROSHOT,
     annotation_to_yolo_line,
     bbox_to_yolo,
     frame_yolo_labels,
+    prepare_yolo_eval_dataset,
     write_yolo_labels,
 )
 
 __all__ = [
+    "COCO80_NAMES",
     "DEFAULT_TARGET_DIR",
     "KITTI_ARCHIVES",
     "KITTI_BASE_URL",
     "KITTI_IMAGE_SIZE",
+    "KITTI_TO_COCO_ZEROSHOT",
+    "KITTI_TO_YOLO_FINETUNE",
     "KITTI_TO_YOLO_ZEROSHOT",
     "KittiArchive",
     "KittiSequence",
@@ -43,5 +50,6 @@ __all__ = [
     "frame_yolo_labels",
     "load_sequence",
     "parse_label_file",
+    "prepare_yolo_eval_dataset",
     "write_yolo_labels",
 ]

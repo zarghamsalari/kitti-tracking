@@ -8,14 +8,19 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import yaml
 
 from tracking.data.kitti import KittiAnnotation, KittiSequence
 from tracking.data.yolo_format import (
+    COCO80_NAMES,
     KITTI_IMAGE_SIZE,
+    KITTI_TO_COCO_ZEROSHOT,
+    KITTI_TO_YOLO_FINETUNE,
     KITTI_TO_YOLO_ZEROSHOT,
     annotation_to_yolo_line,
     bbox_to_yolo,
     frame_yolo_labels,
+    prepare_yolo_eval_dataset,
     write_yolo_labels,
 )
 
@@ -177,3 +182,156 @@ def test_write_yolo_labels_fails_on_inconsistent_dims(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="inconsistent image dimensions"):
         write_yolo_labels([seq], tmp_path / "out")
+
+
+def test_prepare_yolo_eval_dataset_zeroshot_uses_coco_indices(tmp_path: Path) -> None:
+    """T3b zero-shot path: labels in COCO80 index space + nc=80."""
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    img = np.zeros((50, 100, 3), dtype=np.uint8)
+    cv2.imwrite(str(img_dir / "000000.png"), img)
+    cv2.imwrite(str(img_dir / "000001.png"), img)
+
+    seq = KittiSequence(
+        name="0001",
+        image_dir=img_dir,
+        annotations=[
+            _ann("Car", 10, 10, 30, 20, frame=0),
+            _ann("Cyclist", 50, 10, 70, 20, frame=0),  # filtered
+            _ann("Pedestrian", 5, 5, 15, 25, frame=1),
+        ],
+    )
+
+    out_dir = tmp_path / "yolo_dataset"
+    # Default uses KITTI_TO_COCO_ZEROSHOT — caller must pass COCO80_NAMES so
+    # auto-derivation doesn't blow up on sparse indices (Car=2, Ped=0).
+    data_yaml = prepare_yolo_eval_dataset([seq], out_dir, class_names=COCO80_NAMES, split="val")
+
+    assert data_yaml == out_dir.resolve() / "data.yaml"
+    assert data_yaml.is_file()
+
+    # Images materialised
+    assert (out_dir / "images" / "val" / "0001_000000.png").is_file()
+    assert (out_dir / "images" / "val" / "0001_000001.png").is_file()
+
+    # Labels use COCO indices: Car -> 2, Pedestrian -> 0
+    label_0 = (out_dir / "labels" / "val" / "0001_000000.txt").read_text()
+    label_1 = (out_dir / "labels" / "val" / "0001_000001.txt").read_text()
+    assert label_0.startswith("2 "), f"Car must use COCO index 2, got: {label_0[:5]!r}"
+    assert "Cyclist" not in label_0
+    assert label_1.startswith("0 "), f"Pedestrian must use COCO index 0, got: {label_1[:5]!r}"
+
+    # val.txt lists absolute image paths
+    val_txt = (out_dir / "val.txt").read_text().strip().split("\n")
+    assert len(val_txt) == 2
+    assert all(Path(p).is_absolute() for p in val_txt)
+
+    parsed = yaml.safe_load(data_yaml.read_text())
+    assert parsed["nc"] == 80, "Zero-shot eval needs the full COCO80 namespace"
+    assert parsed["names"][0] == "person"
+    assert parsed["names"][2] == "car"
+    assert parsed["path"] == str(out_dir.resolve())
+    # ultralytics' check_det_dataset requires BOTH train and val keys.
+    assert "train" in parsed
+    assert "val" in parsed
+    assert parsed["train"] == "val.txt"
+
+
+def test_prepare_yolo_eval_dataset_finetune_uses_kitti_indices(tmp_path: Path) -> None:
+    """T4 fine-tune path: contiguous KITTI 2-class indices auto-derived."""
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+
+    seq = KittiSequence(
+        name="0001",
+        image_dir=img_dir,
+        annotations=[_ann("Car", 10, 10, 30, 20, frame=0)],
+    )
+
+    out_dir = tmp_path / "yolo_dataset"
+    data_yaml = prepare_yolo_eval_dataset(
+        [seq], out_dir, class_map=KITTI_TO_YOLO_FINETUNE, split="val"
+    )
+
+    label = (out_dir / "labels" / "val" / "0001_000000.txt").read_text()
+    assert label.startswith("0 "), f"Car must use KITTI index 0 in fine-tune, got: {label[:5]!r}"
+
+    parsed = yaml.safe_load(data_yaml.read_text())
+    assert parsed["nc"] == 2
+    assert parsed["names"] == ["Car", "Pedestrian"]
+
+
+def test_prepare_yolo_eval_dataset_rejects_unknown_sparse_classmap(
+    tmp_path: Path,
+) -> None:
+    """Unknown sparse class_map without explicit names must fail loudly.
+
+    The COCO preset is auto-recognised (see the bare-default test below);
+    only genuinely unknown sparse mappings should trigger the guard.
+    """
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+    seq = KittiSequence(name="0001", image_dir=img_dir, annotations=[])
+
+    with pytest.raises(ValueError, match="not contiguous"):
+        prepare_yolo_eval_dataset(
+            [seq],
+            tmp_path / "out",
+            class_map={"Foo": 5, "Bar": 9},  # genuinely unknown sparse
+            split="val",
+        )
+
+
+def test_prepare_yolo_eval_dataset_default_call_path_works(tmp_path: Path) -> None:
+    """Bare-default call must produce a working data.yaml end-to-end.
+
+    Regression guard: the function previously raised ValueError on a bare
+    call because the COCO preset is sparse (Car=2, Pedestrian=0) and the
+    auto-derive guard fired before preset recognition. Now the preset is
+    recognised by identity and class_names auto-fills to COCO80_NAMES.
+
+    This test exercises the API as real callers use it — no kwargs at all.
+    Tests that always pass kwargs miss bugs in the default values themselves.
+    """
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    cv2.imwrite(str(img_dir / "000000.png"), np.zeros((50, 100, 3), dtype=np.uint8))
+    seq = KittiSequence(
+        name="0001",
+        image_dir=img_dir,
+        annotations=[_ann("Car", 10, 10, 30, 20, frame=0)],
+    )
+
+    # No kwargs except the two required positional args.
+    data_yaml = prepare_yolo_eval_dataset([seq], tmp_path / "out")
+
+    assert data_yaml.exists()
+    parsed = yaml.safe_load(data_yaml.read_text())
+    assert parsed["nc"] == 80
+    assert parsed["names"][0] == "person"
+    assert parsed["names"][2] == "car"
+    # The label for the Car annotation should use COCO index 2.
+    label = (tmp_path / "out" / "labels" / "val" / "0001_000000.txt").read_text()
+    assert label.startswith("2 "), f"Default-path Car must use COCO index 2, got: {label[:5]!r}"
+
+
+def test_kitti_to_yolo_zeroshot_alias_matches_finetune() -> None:
+    """Back-compat: the old KITTI_TO_YOLO_ZEROSHOT name still works."""
+    assert KITTI_TO_YOLO_ZEROSHOT == KITTI_TO_YOLO_FINETUNE
+
+
+def test_kitti_to_coco_zeroshot_uses_coco_indices() -> None:
+    """Pinned constant test — guard against silent regressions of the
+    class-space fix that surfaced from the mAP=0.0002 collapse.
+
+    KITTI Car must map to COCO 'car' (index 2).
+    KITTI Pedestrian must map to COCO 'person' (index 0).
+    Anything else means the eval matches against the wrong class space again.
+    """
+    assert KITTI_TO_COCO_ZEROSHOT["Car"] == 2
+    assert KITTI_TO_COCO_ZEROSHOT["Pedestrian"] == 0
+    assert COCO80_NAMES[0] == "person"
+    assert COCO80_NAMES[2] == "car"
+    assert len(COCO80_NAMES) == 80
