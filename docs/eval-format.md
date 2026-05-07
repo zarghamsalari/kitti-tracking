@@ -113,7 +113,7 @@ frame, id, x, y, w, h, conf, class, -1, -1, -1
 | 5 | float | bbox width (px) | pixel space |
 | 6 | float | bbox height (px) | pixel space |
 | 7 | float | confidence | [0, 1], 4 decimal places, ≥ `dump_conf` (0.1) |
-| 8 | int | **class id** (KITTI scheme) | **`0` = Car, `1` = Pedestrian** (`KITTI_TO_YOLO_FINETUNE` values) |
+| 8 | int | **class id** (KITTI scheme) — *0-indexed in Python: `parts[7]`* | **`0` = Car, `1` = Pedestrian** (`KITTI_TO_YOLO_FINETUNE` values) |
 | 9–11 | int | world coordinates x/y/z | `-1, -1, -1` (N/A for 2D) |
 
 **Format (v1 — currently on disk, deprecated)**: 10 columns, no class column. Format version is recorded in `run_meta.json`'s `format_version` field — consumers reject incompatible producers loudly.
