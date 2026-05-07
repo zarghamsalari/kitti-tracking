@@ -8,6 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import yaml
 
 from tracking.data.kitti import KittiAnnotation, KittiSequence
 from tracking.data.yolo_format import (
@@ -16,6 +17,7 @@ from tracking.data.yolo_format import (
     annotation_to_yolo_line,
     bbox_to_yolo,
     frame_yolo_labels,
+    prepare_yolo_eval_dataset,
     write_yolo_labels,
 )
 
@@ -177,3 +179,52 @@ def test_write_yolo_labels_fails_on_inconsistent_dims(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="inconsistent image dimensions"):
         write_yolo_labels([seq], tmp_path / "out")
+
+
+def test_prepare_yolo_eval_dataset_layout(tmp_path: Path) -> None:
+    """End-to-end: prepare_yolo_eval_dataset materialises the full ultralytics layout."""
+    img_dir = tmp_path / "0001"
+    img_dir.mkdir()
+    img = np.zeros((50, 100, 3), dtype=np.uint8)
+    cv2.imwrite(str(img_dir / "000000.png"), img)
+    cv2.imwrite(str(img_dir / "000001.png"), img)
+
+    seq = KittiSequence(
+        name="0001",
+        image_dir=img_dir,
+        annotations=[
+            _ann("Car", 10, 10, 30, 20, frame=0),
+            _ann("Cyclist", 50, 10, 70, 20, frame=0),  # filtered
+            _ann("Pedestrian", 5, 5, 15, 25, frame=1),
+        ],
+    )
+
+    out_dir = tmp_path / "yolo_dataset"
+    data_yaml = prepare_yolo_eval_dataset([seq], out_dir, split="val")
+
+    # data.yaml at the returned path
+    assert data_yaml == out_dir.resolve() / "data.yaml"
+    assert data_yaml.is_file()
+
+    # Image files exist (hardlink or copy) under images/val/<seq>_<frame>.png
+    assert (out_dir / "images" / "val" / "0001_000000.png").is_file()
+    assert (out_dir / "images" / "val" / "0001_000001.png").is_file()
+
+    # Label files exist with right content under labels/val/
+    label_0 = (out_dir / "labels" / "val" / "0001_000000.txt").read_text()
+    label_1 = (out_dir / "labels" / "val" / "0001_000001.txt").read_text()
+    assert label_0.startswith("0 ")  # Car
+    assert "Cyclist" not in label_0  # filtered
+    assert label_1.startswith("1 ")  # Pedestrian
+
+    # val.txt lists absolute image paths
+    val_txt = (out_dir / "val.txt").read_text().strip().split("\n")
+    assert len(val_txt) == 2
+    assert all(Path(p).is_absolute() for p in val_txt)
+
+    # data.yaml has the right keys
+    parsed = yaml.safe_load(data_yaml.read_text())
+    assert parsed["nc"] == 2
+    assert parsed["names"] == ["Car", "Pedestrian"]  # sorted by class id
+    assert parsed["val"] == "val.txt"
+    assert parsed["path"] == str(out_dir.resolve())

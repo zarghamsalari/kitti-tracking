@@ -23,6 +23,7 @@ from tracking.data.yolo_format import (
     annotation_to_yolo_line,
     bbox_to_yolo,
     frame_yolo_labels,
+    prepare_yolo_eval_dataset,
     write_yolo_labels,
 )
 
@@ -43,5 +44,6 @@ __all__ = [
     "frame_yolo_labels",
     "load_sequence",
     "parse_label_file",
+    "prepare_yolo_eval_dataset",
     "write_yolo_labels",
 ]
