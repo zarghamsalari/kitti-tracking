@@ -167,6 +167,7 @@ def _dump_mot16_for_sequence(
     cfg: DetectorConfig,
 ) -> int:
     """Run inference frame-by-frame, write MOT16 rows. Returns row count."""
+    logger.info("Phase 2 [%s]: %d frames, dumping...", seq.name, seq.num_frames)
     rows: list[str] = []
     for frame in range(seq.num_frames):
         img_path = seq.image_dir / f"{frame:06d}.png"

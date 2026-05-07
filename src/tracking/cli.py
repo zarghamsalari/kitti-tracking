@@ -10,10 +10,22 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import typer
 from rich.console import Console
+
+# Configure logging at CLI import so module-level ``logger.info`` calls in
+# tracking.detection.yolo (and other long-running phases) reach the terminal.
+# Without this, phase 2 of ``tracking detect`` runs silently for ~25 minutes,
+# making the process look hung and tempting users to Ctrl+C a still-working
+# inference job mid-flight.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help=__doc__)
 console = Console()
