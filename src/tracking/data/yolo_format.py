@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
+
 from tracking.data.kitti import KittiAnnotation, KittiSequence
 
 KITTI_TO_YOLO_ZEROSHOT: dict[str, int] = {
@@ -32,6 +34,9 @@ KITTI_TO_YOLO_ZEROSHOT: dict[str, int] = {
     "Pedestrian": 1,
 }
 
+# Canonical KITTI image size — actual dims are read per-sequence in
+# write_yolo_labels (see _read_image_size). Kept here for fixtures, docs,
+# and the optional override path of write_yolo_labels.
 KITTI_IMAGE_SIZE: tuple[int, int] = (1242, 375)
 
 
@@ -101,11 +106,46 @@ def frame_yolo_labels(
     return lines
 
 
+def _read_image_size(seq: KittiSequence) -> tuple[int, int]:
+    """Read ``(width, height)`` from the first frame and verify consistency.
+
+    KITTI's documented invariant is that image dimensions are constant
+    within a sequence. We verify this on a sample of frames (first,
+    middle, last) to fail loudly if the invariant is ever violated,
+    rather than silently producing wrong labels for the affected frames.
+    """
+    frames = seq.frames()
+    if not frames:
+        raise ValueError(f"Sequence {seq.name} has no frames in {seq.image_dir}")
+
+    first = cv2.imread(str(frames[0]))
+    if first is None:
+        raise ValueError(f"Could not read first frame: {frames[0]}")
+    h, w = first.shape[:2]
+
+    # Spot-check middle and last frame; skip duplicates (e.g. 1- or 2-frame seqs).
+    check_indices = {len(frames) // 2, len(frames) - 1} - {0}
+    for idx in check_indices:
+        check_img = cv2.imread(str(frames[idx]))
+        if check_img is None:
+            raise ValueError(f"Could not read frame: {frames[idx]}")
+        ch, cw = check_img.shape[:2]
+        if (cw, ch) != (w, h):
+            raise ValueError(
+                f"Sequence {seq.name} has inconsistent image dimensions: "
+                f"frame 0 is {w}x{h} but frame {idx} is {cw}x{ch}. "
+                f"This violates the KITTI single-resolution-per-sequence "
+                f"invariant. Investigate before proceeding."
+            )
+
+    return (w, h)
+
+
 def write_yolo_labels(
     sequences: list[KittiSequence],
     out_dir: Path,
     class_map: dict[str, int] = KITTI_TO_YOLO_ZEROSHOT,
-    image_size: tuple[int, int] = KITTI_IMAGE_SIZE,
+    image_size: tuple[int, int] | None = None,
 ) -> int:
     """Write per-frame YOLO ``.txt`` files under ``out_dir/<seq>/<frame>.txt``.
 
@@ -113,10 +153,17 @@ def write_yolo_labels(
     the class filter). Returns the total number of label lines written
     across all frames — useful for sanity-checking against
     :meth:`KittiTrackingDataset.total_annotations`.
+
+    When ``image_size`` is ``None`` (production), dimensions are read
+    from each sequence's frames on disk via :func:`_read_image_size`,
+    which also enforces the within-sequence consistency invariant.
+    Pass an explicit ``(w, h)`` to skip the disk read — useful for
+    fixture-only tests where frames are placeholders rather than real
+    PNGs.
     """
-    img_w, img_h = image_size
     total_lines = 0
     for seq in sequences:
+        img_w, img_h = image_size if image_size is not None else _read_image_size(seq)
         seq_out = out_dir / seq.name
         seq_out.mkdir(parents=True, exist_ok=True)
         for frame in range(seq.num_frames):
