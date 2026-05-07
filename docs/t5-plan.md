@@ -38,15 +38,23 @@ BYTETracker(
 
 **MANDATORY parameters — must not be removed or defaulted:**
 
-- `per_class=True`: boxmot's default `per_class=False` allows a Car detection
-  to match a Pedestrian track if their IoU exceeds `match_thresh`. Urban KITTI
-  scenes (peds crossing in front of cars, peds near parked cars) trigger this
-  constantly. Result: track IDs that silently flip class mid-sequence; HOTA
-  tanks for opaque reasons.
-- `frame_rate=10`: boxmot computes `buffer_size = int(frame_rate / 30 * track_buffer)`.
-  With the default `frame_rate=30`, `buffer_size=25` frames at KITTI's 10 FPS
-  = 2.5 s of lost-track tolerance (3× the intended ~0.83 s). Tracks persist
-  through occlusions far longer than designed, inflating re-association counts.
+- `per_class=True`: boxmot's default `per_class=False` passes all detections
+  into a single class-agnostic pool before matching. A Pedestrian detection
+  whose IoU with an active Car track exceeds `match_thresh` will be assigned
+  the car's track ID. On KITTI urban sequences — pedestrians crossing in front
+  of moving cars, pedestrians standing adjacent to parked cars — this happens
+  constantly. The corruption is silent: no exception, `track_id` column looks
+  normal, but the class label on that ID silently changes mid-sequence.
+  TrackEval's per-class HOTA then penalises every frame where the ID's
+  class disagrees with GT, tanking AssA for both Car and Pedestrian with no
+  obvious pointer to the cause.
+- `frame_rate=10`: boxmot computes `buffer_size = int(frame_rate / 30.0 * track_buffer)`.
+  With the library default `frame_rate=30`, `buffer_size = int(30/30 * 25) = 25`
+  frames. At KITTI's 10 FPS that is 2.5 s of lost-track tolerance — 3× the
+  intended ~0.83 s. Tracks that should be declared lost after a brief occlusion
+  persist for 2.5 s, accumulate false re-associations, and inflate AssA. With
+  `frame_rate=10`, `buffer_size = int(10/30 * 25) = 8` frames (0.8 s), which
+  matches the original paper's intent.
 
 **Alignment note:** `min_conf=0.1` matches `dump_conf=0.1` from T3b. This is
 intentional — the dump threshold sets the floor on what enters the pipeline;
@@ -60,6 +68,15 @@ Pin `boxmot==18.0.0` in `pyproject.toml`. This is the version the contract in
 re-verifying Boundaries 2 and 3 (especially `per_class` semantics and the
 `frame_rate` formula, which are internal implementation details that could
 change between major versions without a changelog entry).
+
+### Ablation hygiene
+
+T5 (ByteTrack) and T7 (BoT-SORT) both use library defaults for
+`track_thresh`, `match_thresh`, and `track_buffer`. This is intentional — any
+hyperparameter tuning applied to only one tracker would contaminate the
+ablation; the metric difference would no longer be purely tracker-attributable.
+Tune only **after** both trackers have a default-parameter baseline on record,
+and apply the same trials to both.
 
 ### Detection input
 
@@ -171,10 +188,11 @@ For each sequence:
 
 ### E. Config update (`configs/tracker_bytetrack.yaml`)
 
-The existing config has the right shape but points at
-`runs/det/yolov8m_finetuned` (T4 detections). Update `detections_dir` to
-`runs/det/yolov8m_zeroshot` for this PR. Add `per_class: true` and
-`nr_classes: 2` explicitly (do not rely on defaults).
+The stub config was written speculatively and points at
+`runs/det/yolov8m_finetuned/` — T4 detections that do not exist yet. For T5,
+update `detections_dir` to `runs/det/yolov8m_zeroshot`. When T4 lands (T7
+ablation), this will be a one-line config swap with no code changes. Add
+`per_class: true` and `nr_classes: 2` explicitly (do not rely on defaults).
 
 ### F. CLI (`src/tracking/cli.py`)
 
@@ -193,14 +211,18 @@ lightweight dataclass is fine.
 
 ## Tests (CI-runnable, no GPU, no KITTI data)
 
-### Synthetic smoke test (most important)
+Test names describe the contract being verified, not the setup, so CI failure
+messages are self-explanatory six months from now.
+
+### Stable-ID smoke test
 
 ```python
-def test_bytetrack_stable_ids_two_stationary_boxes() -> None:
-    """Two non-overlapping boxes, 3 frames, same position — expect 2 stable IDs.
+def test_bytetrack_assigns_stable_ids_across_frames() -> None:
+    """Track IDs must be consistent across consecutive frames for the same object.
 
-    Verifies per_class=True is wired correctly: one Car, one Pedestrian,
-    IDs must not swap.
+    Non-overlapping Car and Pedestrian boxes — verifies basic association
+    stability. Cross-class separation is verified separately in
+    test_per_class_prevents_cross_class_id_continuation.
     """
     from boxmot import BYTETracker
     tracker = BYTETracker(per_class=True, nr_classes=2, frame_rate=10)
@@ -214,20 +236,107 @@ def test_bytetrack_stable_ids_two_stationary_boxes() -> None:
     assert len(ids[0]) == 2, "Expected exactly 2 active tracks"
 ```
 
+### Per-class isolation test (most important)
+
+```python
+def test_per_class_prevents_cross_class_id_continuation() -> None:
+    """With per_class=True, a track of one class must not be continued
+    by a detection of a different class, even if their boxes overlap perfectly.
+
+    This is the specific failure mode of per_class=False on urban KITTI:
+    a Pedestrian detection whose IoU with a Car track exceeds match_thresh
+    gets the car's track ID. The boxes here overlap 100%, so without
+    per_class filtering the match would be made.
+    """
+    from boxmot import BYTETracker
+    tracker = BYTETracker(per_class=True, nr_classes=2, frame_rate=10)
+    img = np.zeros((375, 1242, 3), dtype=np.uint8)
+
+    # Frame 0: a Car at a specific location.
+    car = np.array([[100, 100, 200, 200, 0.90, 0.0]], dtype=np.float32)
+    out_0 = tracker.update(car, img)
+    car_id = int(out_0[0, 4])
+
+    # Frame 1: a Pedestrian at the SAME location. With per_class=False this
+    # detection would be matched to the car track (IoU = 1.0 > match_thresh).
+    # With per_class=True it must not — a different class must never extend
+    # an existing track.
+    ped = np.array([[100, 100, 200, 200, 0.90, 1.0]], dtype=np.float32)
+    out_1 = tracker.update(ped, img)
+
+    if len(out_1) > 0:
+        ped_id = int(out_1[0, 4])
+        assert ped_id != car_id, (
+            f"Cross-class ID continuation: pedestrian got the car's track ID "
+            f"({car_id}). per_class is not actually filtering by class."
+        )
+```
+
+### Empty-frame / frame-counter test
+
+```python
+def test_empty_frame_advances_internal_frame_counter() -> None:
+    """Empty-frame update() calls must advance the internal frame counter,
+    so a track that disappears for longer than the buffer is correctly lost.
+
+    With frame_rate=10 and track_buffer=25:
+        buffer_size = int(10 / 30 * 25) = 8 frames
+    10 consecutive empty frames is past the buffer — the original track must
+    be declared lost and the next detection of the same object gets a new ID.
+    If empty calls did NOT advance the counter, the tracker would never age
+    out the stale track, and IDs would persist indefinitely through occlusions.
+    """
+    from boxmot import BYTETracker
+    tracker = BYTETracker(
+        per_class=True, nr_classes=2, frame_rate=10, track_buffer=25
+    )
+    img = np.zeros((375, 1242, 3), dtype=np.uint8)
+    car_box = np.array([[100, 100, 200, 200, 0.90, 0.0]], dtype=np.float32)
+
+    # Frame 0: establish a Car track, record its ID.
+    out_0 = tracker.update(car_box, img)
+    original_id = int(out_0[0, 4])
+
+    # Frames 1–10: empty. 10 > buffer_size (8), so the track must be lost.
+    for _ in range(10):
+        out_empty = tracker.update(np.empty((0, 6), dtype=np.float32), img)
+        assert out_empty.shape == (0, 8), (
+            f"Empty-frame output should be (0, 8), got {out_empty.shape}"
+        )
+
+    # Frame 11: same Car at same location. If the frame counter advanced
+    # correctly, the original track is gone and this gets a NEW ID.
+    out_11 = tracker.update(car_box, img)
+    assert len(out_11) > 0, "Expected detection to produce a track"
+    new_id = int(out_11[0, 4])
+    assert new_id != original_id, (
+        f"Frame counter did not advance during empty calls: "
+        f"detection after 10 empty frames reused track ID {original_id}, "
+        f"but it should have been declared lost (buffer is 8 frames)."
+    )
+```
+
 ### MOT16 I/O round-trip test
 
 Write a known (frame, track_id, xywh, conf, cls) array → v2 file, read it
 back, assert xyxy conversion round-trips losslessly.
 
-### Empty-frame test
-
-Call `tracker.update(np.empty((0, 6), dtype=np.float32), img)` for 3 frames,
-assert no exception and return shape `(0, 8)` each time.
-
 ### Format version guard test
 
 `read_mot16_v2` on a file whose adjacent `run_meta.json` has
-`format_version: "mot16-kitti-v1"` must raise `ValueError`, not silently parse.
+`format_version: "mot16-kitti-v1"` must raise `ValueError` with a message
+that includes `"mot16-kitti-v1"` — so the error tells you exactly which file
+triggered it. Silent parse is the failure mode being guarded: a v1 file
+(missing class column) consumed as v2 would produce all-`-1` class IDs, and
+HOTA would silently compute on the wrong class assignments.
+
+```python
+def test_read_mot16_v2_refuses_v1_format_version(tmp_path: Path) -> None:
+    # write a v1 run_meta.json adjacent to a dummy detection file
+    ...
+    with pytest.raises(ValueError, match="mot16-kitti-v1"):
+        read_mot16_v2(det_file)
+```
 
 ---
 
@@ -253,7 +362,7 @@ Checklist:
 - `src/tracking/trackers/mot16_io.py` — new file (reader + writer)
 - `configs/tracker_bytetrack.yaml` — update detections_dir + add per_class/nr_classes
 - `src/tracking/cli.py` — wire `tracking track` command
-- `tests/test_bytetrack.py` — new (smoke test, round-trip, empty-frame, v1-guard)
+- `tests/test_bytetrack.py` — new: `test_bytetrack_assigns_stable_ids_across_frames`, `test_per_class_prevents_cross_class_id_continuation`, `test_empty_frame_advances_internal_frame_counter`, `test_read_mot16_v2_refuses_v1_format_version`, round-trip
 - `pyproject.toml` — add `boxmot==18.0.0`
 
 ---
