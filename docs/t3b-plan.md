@@ -6,10 +6,25 @@
 First real ML inference of the project. Run YOLOv8m COCO-pretrained on the 5 val sequences. Two artifacts: per-class mAP (writeup material), and MOT16-format detections (T5/T7 tracker input — the *fixed* input that makes the ablation clean). No fine-tuning yet — that's T4.
 
 ## Locked design decisions
-1. `ultralytics` cache stays at `~/.config/Ultralytics/` (Windows: `%APPDATA%\Ultralytics\`) — verify outside repo/venv before first run
+1. `ultralytics` weights download to **cwd** (`./yolov8m.pt`), not `%APPDATA%\Ultralytics\` as previously assumed. Recent ultralytics versions (≥8.0) write to the working directory. Already gitignored via the `*.pt` rule — no repo bloat.
 2. `imgsz=1280` everywhere — KITTI's small distant objects need it; speed cost is acceptable
 3. Two pipelines from one model: `model.val()` for mAP, separate `model(image)` loop for MOT16 dumps
 4. `conf=0.1` for MOT dumps (NOT 0.5) — preserves ByteTrack's low-conf differentiator. `conf=0.001` for `model.val()` (mAP needs the full PR curve)
+
+## Note for T4 (and any future YOLO label generation)
+
+KITTI image dimensions are **not uniform** across sequences. Empirically verified across all 21 training-split sequences (16 train + 5 val):
+
+| Resolution | Sequences | Count |
+|------------|-----------|-------|
+| 1242×375   | 0000–0013 (excl. 0014–0016) | 14 |
+| 1224×370   | 0014, 0015, 0016, 0017 | 4 |
+| 1238×374   | 0019 | 1 |
+| 1241×376   | 0020 | 1 |
+
+**7 of 21 sequences (33%) deviate** from canonical 1242×375; 0020 is one pixel off in each axis (adversarially close to canonical).
+
+**Implication for T4:** training-sequence YOLO label generation MUST call `write_yolo_labels(image_size=None)` so dimensions are read per-sequence via `_read_image_size()`. The hardcoded default would silently mis-normalise labels by 1–1.5% on a third of the training data, corrupting fine-tune targets. Same rule applies to T3b val labels.
 
 ## Implementation scope
 
