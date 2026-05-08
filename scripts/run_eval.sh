@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Full pipeline: detect -> track (both trackers) -> eval -> markdown
-# Assumes the detector has already been fine-tuned. If not, run `make detect` first.
+# Eval harness: compute metrics for any tracker whose track files exist.
+#
+# Detect/track steps are NOT here — they are CPU-bound (minutes to hours)
+# and run separately:
+#   make detect                      (T3b output, ~30 min on CPU)
+#   make track TRACKER=bytetrack     (T5 output, ~5 min)
+# This script is intentionally fast: reads existing track files, computes metrics.
 
 set -euo pipefail
 
@@ -12,27 +17,34 @@ if [[ ! -d "$GT_DIR" ]]; then
     exit 1
 fi
 
-echo "==> Detection"
-tracking detect --config configs/detector_yolov8.yaml
-
+results=()
 for tracker in bytetrack botsort; do
-    echo "==> Tracking with $tracker"
-    tracking track --config "configs/tracker_${tracker}.yaml"
+    track_dir="runs/track/${tracker}"
+    if [[ ! -d "$track_dir" ]]; then
+        echo "==> Skipping $tracker (no track files at $track_dir)"
+        continue
+    fi
 
     echo "==> Eval $tracker"
     tracking eval \
         --gt "$GT_DIR" \
-        --pred "runs/track/${tracker}" \
+        --pred "$track_dir" \
         --out "docs/results_${tracker}.md"
+    results+=("docs/results_${tracker}.md")
 done
 
-# Concatenate per-tracker results into the main results file
+if [[ ${#results[@]} -eq 0 ]]; then
+    echo "No trackers evaluated. Run 'make track' first."
+    exit 1
+fi
+
 {
     echo "# Results"
     echo
-    cat docs/results_bytetrack.md
-    echo
-    cat docs/results_botsort.md
+    for f in "${results[@]}"; do
+        cat "$f"
+        echo
+    done
 } > docs/results.md
 
 echo "==> Wrote docs/results.md"
