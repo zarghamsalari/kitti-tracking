@@ -175,15 +175,13 @@ def test_read_mot16_v2_tracks_preserves_track_id(tmp_path: Path) -> None:
     from tracking.trackers.mot16_io import read_mot16_v2_tracks
 
     (tmp_path / "run_meta.json").write_text(json.dumps({"format_version": "mot16-kitti-v2"}))
-    (tmp_path / "0001.txt").write_text(
-        "0,7,10.00,20.00,100.00,50.00,0.9000,0,-1,-1,-1\n"
-    )
+    (tmp_path / "0001.txt").write_text("0,7,10.00,20.00,100.00,50.00,0.9000,0,-1,-1,-1\n")
     result = read_mot16_v2_tracks(tmp_path / "0001.txt")
     assert 0 in result
     row = result[0][0]
     assert row.shape == (7,)
     assert row[4] == 7.0, "track_id must be preserved at column 4"
-    np.testing.assert_allclose(row[0], 10.0, atol=1e-2)   # x1
+    np.testing.assert_allclose(row[0], 10.0, atol=1e-2)  # x1
     np.testing.assert_allclose(row[2], 110.0, atol=1e-2)  # x2 = x + w
 
 
