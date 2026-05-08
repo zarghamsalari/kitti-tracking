@@ -165,6 +165,28 @@ def test_mot16_v2_round_trip(tmp_path: Path) -> None:
     np.testing.assert_allclose(result[1][0], [15.0, 25.0, 115.0, 125.0, 0.88, 1.0], atol=1e-2)
 
 
+def test_read_mot16_v2_tracks_preserves_track_id(tmp_path: Path) -> None:
+    """track_id must appear at column 4 of the (N,7) output array.
+
+    read_mot16_v2 (the detection reader) discards track_id because detections
+    always have track_id=-1. The tracks reader must NOT discard it — evaluating
+    HOTA with all-zero IDs gives HOTA=0 with no runtime error.
+    """
+    from tracking.trackers.mot16_io import read_mot16_v2_tracks
+
+    (tmp_path / "run_meta.json").write_text(json.dumps({"format_version": "mot16-kitti-v2"}))
+    (tmp_path / "0001.txt").write_text(
+        "0,7,10.00,20.00,100.00,50.00,0.9000,0,-1,-1,-1\n"
+    )
+    result = read_mot16_v2_tracks(tmp_path / "0001.txt")
+    assert 0 in result
+    row = result[0][0]
+    assert row.shape == (7,)
+    assert row[4] == 7.0, "track_id must be preserved at column 4"
+    np.testing.assert_allclose(row[0], 10.0, atol=1e-2)   # x1
+    np.testing.assert_allclose(row[2], 110.0, atol=1e-2)  # x2 = x + w
+
+
 def test_read_mot16_v2_refuses_v1_format_version(tmp_path: Path) -> None:
     """read_mot16_v2 must raise ValueError when the adjacent run_meta.json
     reports format_version 'mot16-kitti-v1', not silently parse stale files.
