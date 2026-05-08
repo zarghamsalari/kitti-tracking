@@ -43,7 +43,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# (class_name, integer_cls_id) pairs — must match KITTI label strings and our cls encoding
+# (class_name, integer_cls_id) pairs - must match KITTI label strings and our cls encoding
 _KITTI_EVAL_CLASSES: tuple[tuple[str, int], ...] = (("Car", 0), ("Pedestrian", 1))
 
 # TrackEval key names verified against trackeval==1.3.0 source (2026-05-08).
@@ -103,7 +103,7 @@ def _iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
 
     Returns:
         (N, M) float32 IoU values. Returns shape (N, 0) or (0, M) when
-        either input is empty — TrackEval handles zero-dimension arrays.
+        either input is empty - TrackEval handles zero-dimension arrays.
     """
     n = gt_boxes.shape[0]
     m = pred_boxes.shape[0]
@@ -132,7 +132,7 @@ def _iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
 
 
 def _build_sequence_data(
-    gt_annots: list[Any],  # list[KittiAnnotation] — typed as Any to avoid circular import
+    gt_annots: list[Any],  # list[KittiAnnotation] - typed as Any to avoid circular import
     pred_by_frame: dict[int, np.ndarray],
     num_frames: int,
     cls_id: int,
@@ -196,6 +196,20 @@ def _build_sequence_data(
         tracker_ids_list.append(tracker_ids_t)
         similarity_scores_list.append(_iou_matrix(gt_boxes_t, pred_boxes_t))
 
+    # Remap sparse IDs to dense 0-indexed integers (TrackEval contract).
+    # KITTI track IDs are sparse; TrackEval indexes arrays of shape
+    # (num_gt_ids, num_tracker_ids) using these IDs directly, so they
+    # must be in [0, num_*_ids). Sort for deterministic mapping.
+    gt_id_map = {int(orig): idx for idx, orig in enumerate(sorted(all_gt_ids))}
+    tracker_id_map = {int(orig): idx for idx, orig in enumerate(sorted(all_tracker_ids))}
+    for i in range(len(gt_ids_list)):
+        if gt_ids_list[i].size > 0:
+            gt_ids_list[i] = np.array([gt_id_map[int(v)] for v in gt_ids_list[i]], dtype=np.int32)
+        if tracker_ids_list[i].size > 0:
+            tracker_ids_list[i] = np.array(
+                [tracker_id_map[int(v)] for v in tracker_ids_list[i]], dtype=np.int32
+            )
+
     return {
         "num_timesteps": num_frames,
         "num_gt_ids": len(all_gt_ids),
@@ -217,7 +231,7 @@ def _kitti_class_to_id(obj_class: str) -> int:
 def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
     """Compute HOTA / MOTA / IDF1 / IDSw across val sequences.
 
-    Reads val_sequences and tracker_name from pred_dir/run_meta.json.
+    Reads sequences and tracker_name from pred_dir/run_meta.json.
     Evaluates per class (Car, Pedestrian), then produces two TrackerMetrics rows:
       - <name>-macro:    equal class weight (balances Car vs Pedestrian quality)
       - <name>-weighted: instance-weighted (matches published KITTI baselines)
@@ -270,7 +284,6 @@ def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
         }
         class_gt_counts[cls_name] = total_gt
 
-    sum(class_gt_counts.values())
     classes = [c for c, _ in _KITTI_EVAL_CLASSES]
 
     def _macro_mean_alpha(key: str, sub: str) -> float:
