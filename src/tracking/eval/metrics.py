@@ -232,7 +232,7 @@ def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
     from tracking.trackers.mot16_io import read_mot16_v2_tracks
 
     meta = json.loads((pred_dir / "run_meta.json").read_text())
-    sequences: list[str] = meta["val_sequences"]
+    sequences: list[str] = sorted(meta["detection_input_hashes"].keys())
     tracker_name: str = meta.get("tracker_name") or pred_dir.name
 
     # Per-class results: {cls_name: {seq: result_dict}}
