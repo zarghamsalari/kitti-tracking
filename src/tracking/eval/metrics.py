@@ -48,10 +48,10 @@ _KITTI_EVAL_CLASSES: tuple[tuple[str, int], ...] = (("Car", 0), ("Pedestrian", 1
 
 # TrackEval key names verified against trackeval==1.3.0 source (2026-05-08).
 # Update this comment if trackeval is upgraded and keys change.
-_HOTA_ALPHA_KEYS = ("HOTA", "AssA", "DetA")   # np.ndarray shape (19,) over alpha
-_CLEAR_RATE_KEYS = ("MOTA",)                   # scalar float, macro-averaged
+_HOTA_ALPHA_KEYS = ("HOTA", "AssA", "DetA")  # np.ndarray shape (19,) over alpha
+_CLEAR_RATE_KEYS = ("MOTA",)  # scalar float, macro-averaged
 _CLEAR_COUNT_KEYS = ("IDSW", "Frag", "MT", "ML")  # int, summed across classes
-_IDENTITY_RATE_KEYS = ("IDF1",)                # scalar float, macro-averaged
+_IDENTITY_RATE_KEYS = ("IDF1",)  # scalar float, macro-averaged
 
 
 @dataclass
@@ -95,7 +95,7 @@ class EvalResults:
 
 
 def _iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
-    """Compute N×M IoU matrix for xyxy boxes. Pure numpy, no GPU dependency.
+    """Compute NxM IoU matrix for xyxy boxes. Pure numpy, no GPU dependency.
 
     Args:
         gt_boxes:   (N, 4) float32 xyxy
@@ -111,7 +111,7 @@ def _iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
         return np.zeros((n, m), dtype=np.float32)
 
     # Broadcast: gt (N,1,4), pred (1,M,4)
-    gt = gt_boxes[:, np.newaxis, :]    # (N, 1, 4)
+    gt = gt_boxes[:, np.newaxis, :]  # (N, 1, 4)
     pred = pred_boxes[np.newaxis, :, :]  # (1, M, 4)
 
     inter_x1 = np.maximum(gt[..., 0], pred[..., 0])
@@ -270,7 +270,7 @@ def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
         }
         class_gt_counts[cls_name] = total_gt
 
-    total_gt_all = sum(class_gt_counts.values())
+    sum(class_gt_counts.values())
     classes = [c for c, _ in _KITTI_EVAL_CLASSES]
 
     def _macro_mean_alpha(key: str, sub: str) -> float:
@@ -279,8 +279,9 @@ def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
     def _weighted_mean_alpha(key: str, sub: str) -> float:
         w = np.array([class_gt_counts[c] for c in classes], dtype=float)
         w /= w.sum()
-        return float(sum(w[i] * float(np.mean(class_results[c][sub][key]))
-                         for i, c in enumerate(classes)))
+        return float(
+            sum(w[i] * float(np.mean(class_results[c][sub][key])) for i, c in enumerate(classes))
+        )
 
     def _macro_mean_scalar(key: str, sub: str) -> float:
         return float(np.mean([class_results[c][sub][key] for c in classes]))
@@ -288,8 +289,7 @@ def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
     def _weighted_mean_scalar(key: str, sub: str) -> float:
         w = np.array([class_gt_counts[c] for c in classes], dtype=float)
         w /= w.sum()
-        return float(sum(w[i] * float(class_results[c][sub][key])
-                         for i, c in enumerate(classes)))
+        return float(sum(w[i] * float(class_results[c][sub][key]) for i, c in enumerate(classes)))
 
     def _sum_counts(key: str, sub: str) -> int:
         return int(sum(class_results[c][sub][key] for c in classes))
@@ -322,10 +322,16 @@ def evaluate(gt_dir: Path, pred_dir: Path) -> EvalResults:
 
     logger.info(
         "%s macro:    HOTA=%.2f  MOTA=%.2f  IDF1=%.2f",
-        tracker_name, tm_macro.hota, tm_macro.mota, tm_macro.idf1,
+        tracker_name,
+        tm_macro.hota,
+        tm_macro.mota,
+        tm_macro.idf1,
     )
     logger.info(
         "%s weighted: HOTA=%.2f  MOTA=%.2f  IDF1=%.2f",
-        tracker_name, tm_weighted.hota, tm_weighted.mota, tm_weighted.idf1,
+        tracker_name,
+        tm_weighted.hota,
+        tm_weighted.mota,
+        tm_weighted.idf1,
     )
     return EvalResults(trackers=[tm_macro, tm_weighted])
