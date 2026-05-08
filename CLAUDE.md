@@ -1,12 +1,7 @@
 # Object Tracking on KITTI MOT
 
-> This file is read by Claude Code at session start. It is the single source of truth for project context, conventions, and tasks. Keep it updated as work progresses.
-
 ## Owner
-Zargham — AI Project Manager / Data Scientist. Personal portfolio project, separate from AISUS work.
-
-## Why this project exists
-A public, reproducible multi-object tracking pipeline on KITTI 2D MOT. Output is a public GitHub repo + short paper + live demo. Audience is recruiters, collaborators, and the `@ai.industrial` Instagram following — **not** AISUS clients. Public datasets only (KITTI). No AISUS code, IP, or asset data ever enters this repo.
+Zargham — AI Project Manager
 
 ## Goal
 Reproducible MOT pipeline on KITTI 2D MOT (cars + pedestrians). Detector frozen, tracker is the variable being ablated.
@@ -38,42 +33,8 @@ Reproducible MOT pipeline on KITTI 2D MOT (cars + pedestrians). Detector frozen,
 - Deploy: Render (Streamlit demo)
 
 ## Repo layout
-```
-.
-├── CLAUDE.md                     # this file
-├── CLAUDE_CODE_SETUP.md          # human-facing setup notes (not for Claude Code)
-├── README.md
-├── pyproject.toml
-├── Makefile
-├── Dockerfile
-├── .gitignore
-├── .pre-commit-config.yaml
-├── .github/workflows/ci.yml
-├── configs/
-│   ├── detector_yolov8.yaml
-│   ├── tracker_bytetrack.yaml
-│   └── tracker_botsort.yaml
-├── src/tracking/
-│   ├── cli.py                    # typer entry — `tracking detect|track|eval|demo`
-│   ├── detection/yolo.py         # YOLOv8 wrapper, KITTI fine-tune, MOT-format dump
-│   ├── trackers/
-│   │   ├── bytetrack.py
-│   │   └── botsort.py
-│   ├── eval/metrics.py           # HOTA / MOTA / IDF1 / IDSw via TrackEval
-│   ├── viz/overlay.py            # bbox + ID overlay on frames, mp4 export
-│   ├── data/kitti.py             # KITTI MOT loader, sequence-aware splits
-│   └── utils/seed.py             # deterministic seeding
-├── scripts/
-│   ├── download_kitti.sh
-│   └── run_eval.sh
-├── tests/                        # pytest, no GPU/data dependence in CI
-├── notebooks/01_explore_kitti.ipynb
-├── streamlit_app/app.py
-├── docs/paper.md                 # writeup
-└── data/                         # gitignored — KITTI lives here locally
-```
 
-## KITTI MOT split (canonical for this repo)
+## KITTI MOT split 
 KITTI tracking has 21 training sequences (0000–0020) with public GT. We use:
 - **Train:** 0000, 0002, 0003, 0004, 0005, 0007, 0008, 0009, 0010, 0011, 0012, 0014, 0015, 0016, 0018, 0020
 - **Val:** 0001, 0006, 0013, 0017, 0019
@@ -90,7 +51,7 @@ Pick them off in roughly this order — each builds on the previous. No time pre
 - [x] **T3 — Detection: zero-shot.** Run YOLOv8m COCO-pretrained on KITTI val (COCO car→Car, person→Pedestrian). Log per-class mAP. Save MOT16 detections under `runs/det/yolov8m_zeroshot/`. Numbers: Car mAP@0.5:0.95 = 0.456, Pedestrian = 0.232, all-mAP@0.5 = 0.707. 32k detections across 5 val sequences.
 - [ ] **T4 — Detection: fine-tune.** Convert KITTI labels to YOLO format (sequence-respecting train/val split), fine-tune YOLOv8m at imgsz=1280 for 30–50 epochs. Save MOT16 detections under `runs/det/yolov8m_finetuned/`.
 - [x] **T5 — Tracker #1: ByteTrack.** Wire ByteTrack on top of saved detections. Tune `track_thresh`, `match_thresh`, `track_buffer` (≤5 trials on val). Output `runs/track/bytetrack/`. 17,146 track rows across 5 val sequences. Per-instance class isolation (boxmot 18.0.0 per_class=True has incomplete isolation via shared lost_stracks).
-- [ ] **T6 — Eval harness.** TrackEval integration. `make eval` produces `docs/results.md` with HOTA/MOTA/IDF1/AssA/DetA/IDSw/Frag/MT/ML.
+- [x] **T6 — Eval harness.** TrackEval integration. `make eval` produces `docs/results.md` with HOTA/MOTA/IDF1/AssA/DetA/IDSw/Frag/MT/ML. **Baseline (zero-shot YOLOv8m + ByteTrack, 5 val sequences):** bytetrack-macro HOTA=0.41, MOTA=0.07, IDF1=0.54, AssA=0.48, DetA=0.36, IDSw=152, Frag=384, MT=102, ML=20. AssA > DetA confirms detection is the bottleneck — T4 (fine-tune detector) directly attacks DetA. Three contract bugs found and fixed during integration: (1) `val_sequences` key absent from run_meta — derive from `detection_input_hashes` keys; (2) TrackEval requires dense 0-indexed gt/tracker IDs but KITTI ids are sparse — added remap step in `_build_sequence_data`; (3) integration test gap (no end-to-end test calling `evaluate()` against real run_meta schema) — followup PR pending.
 - [ ] **T7 — Tracker #2: BoT-SORT + ablation.** Same detections, swap tracker. Side-by-side comparison in `docs/results.md`. Verify shared detection input by hashing detection files in `run_meta.json`.
 - [ ] **T8 — Streamlit demo.** Sequence picker → tracker picker → annotated mp4 + metrics. Dockerize. Test container locally.
 - [ ] **T9 — Deploy demo.** Push to Render. Public URL in README badge.
@@ -110,6 +71,7 @@ Update the boxes above as work progresses. Each task → one feature branch → 
 ### Git
 - Branch per task: `t1-push-github`, `t2-download`, `t3-detection-zeroshot`, etc. Squash-merge to `main`.
 - Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`, `test:`, `refactor:`.
+- **Do NOT add `Co-authored-by:` trailers attributing Claude or Anthropic.** Author commits as the user only.
 - Tag end of project as `v0.1.0`.
 
 ### Testing
@@ -118,6 +80,7 @@ Update the boxes above as work progresses. Each task → one feature branch → 
 - `pytest -m slow` for any test that needs real data — excluded from CI.
 - Coverage target: 70% on `src/tracking/{data,eval}/` (the parts where bugs cause silent metric inflation).
 - **Test the default call path.** When a function has defaulted arguments, write at least one test that calls it with no kwargs (`fn(required_arg)`) and asserts success. Tests that always pass kwargs miss bugs in the default values themselves.
+- **Integration tests for cross-component contracts.** When function X reads a file produced by function Y (e.g., `evaluate()` reading `run_meta.json` written by `bytetrack.py`), write an end-to-end test that runs both. Unit tests of helpers in isolation miss contract mismatches; integration tests catch them.
 
 ### Metrics discipline
 - Primary metric: **HOTA**. Report MOTA and IDF1 alongside but never as headline.
@@ -155,6 +118,10 @@ make docker         # build container
 - **Library defaults may encode implicit frame-of-reference assumptions.** Any parameter with a unit or scale (FPS, image size, sample rate, temporal window) must be verified against your data before accepting its default. Discovered: boxmot's `frame_rate=30` default caused 3× too-permissive lost-track tolerance on KITTI 10 FPS data (`buffer_size = int(frame_rate / 30 * track_buffer)`). Always set `frame_rate=10` for KITTI.
 
 - **Multi-class trackers default to class-agnostic matching — verify `per_class` in source.** boxmot's `per_class=False` default allows Car↔Pedestrian ID swaps at every IoU-sufficient proximity event. The bug is silent: no runtime error, just wrong HOTA. Always set `per_class=True, nr_classes=<your class count>` for class-preserving tracking.
+
+- **Verify cross-component contracts before integration.** Three contract bugs surfaced in T6 alone — (1) `evaluate()` expected a `val_sequences` key in `run_meta.json` that the tracker writer never emitted; (2) TrackEval requires dense 0-indexed track IDs but KITTI's are sparse (gaps like 0,1,2,…,89,95,100); (3) no end-to-end test ever called `evaluate()` against real upstream artifacts, so unit tests passed while integration broke. For every future integration: read both producer and consumer source, list keys/types/index conventions, write an integration test that runs both ends with realistic synthetic data. The pattern from T5's boxmot pre-flight (`per_class`, `frame_rate`) generalizes — always run a "PR 0 research" step before writing integration code.
+
+- **Tooling failure recognition.** When an agent's file-edit tool fails repeatedly with the same error (e.g., `EEXIST` on Windows file paths), do not escalate to shell workarounds (heredocs, `python -c`, `sed`). Each workaround invites a new escaping or encoding failure mode. Stop, restart the agent, or do the edit manually in a real editor. Time spent fighting tooling far exceeds time spent doing the edit by hand.
 
 ## Anti-goals (do not do these)
 - Do not write a custom tracker from scratch. Use ByteTrack and BoT-SORT as published.
