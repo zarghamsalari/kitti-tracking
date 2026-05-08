@@ -28,6 +28,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -56,7 +57,7 @@ class ByteTrackConfig(BaseModel):
     seed: int = 42
 
 
-def _make_tracker(cfg: ByteTrackConfig) -> object:
+def _make_tracker(cfg: ByteTrackConfig) -> Any:
     """Construct one ByteTrack instance with the config parameters."""
     from boxmot.trackers import ByteTrack
 
