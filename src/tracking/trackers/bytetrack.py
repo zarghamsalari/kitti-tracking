@@ -138,6 +138,7 @@ def _write_run_meta(
     meta = {
         "format_version": "mot16-kitti-v2",
         "detection_format_version_consumed": "mot16-kitti-v2",
+        "tracker_name": cfg.name,
         "config_path": str(config_path),
         "config_hash": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "detection_input_hashes": det_hashes,
