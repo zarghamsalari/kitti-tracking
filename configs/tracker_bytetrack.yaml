@@ -1,17 +1,25 @@
-# ByteTrack config (task T5)
-tracker:
-  name: bytetrack
-  track_thresh: 0.5      # low-confidence detection threshold for second association
-  match_thresh: 0.8      # IoU threshold for matching
-  track_buffer: 30       # frames to keep lost tracks alive
-  high_thresh: 0.6       # confidence threshold for new track creation
-  frame_rate: 10         # KITTI MOT is 10 fps
+# ByteTrack config (task T5).
+#
+# Class isolation: one ByteTrack instance is created per class (nr_classes=2).
+# Each instance only sees detections of its own class, so lost Car tracks are
+# never matched against Pedestrian detections (and vice versa). This is the
+# workaround for boxmot 18.0.0's shared lost_stracks across per_class pools.
+#
+# frame_rate: 10 is MANDATORY — KITTI FPS; buffer_size = int(10/30*25) = 8 frames.
+# Library default (30) would give buffer_size=25 frames = 2.5 s tolerance at 10 FPS.
+#
+# T4 swap: update detections_dir to runs/det/yolov8m_finetuned when T4 lands.
 
-input:
-  detections_dir: runs/det/yolov8m_finetuned
+name: bytetrack
+detections_dir: runs/det/yolov8m_zeroshot
+tracks_dir: runs/track/bytetrack
+data_root: data/kitti_tracking
+val_sequences: ["0001", "0006", "0013", "0017", "0019"]
 
-output:
-  tracks_dir: runs/track/bytetrack
-  format: mot16
-
+track_thresh: 0.45
+match_thresh: 0.8
+track_buffer: 25
+frame_rate: 10
+min_conf: 0.1
+nr_classes: 2
 seed: 42

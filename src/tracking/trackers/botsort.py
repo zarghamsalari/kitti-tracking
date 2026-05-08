@@ -18,8 +18,8 @@ Implementation notes for Claude Code:
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 
-def run_botsort(config: dict[str, Any]) -> None:
+def run_botsort(config_path: Path) -> None:
     raise NotImplementedError("Task T7. See module docstring for the implementation plan.")
