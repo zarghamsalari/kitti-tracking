@@ -150,6 +150,12 @@ make docker         # build container
 4. Ask the user whether to start that task, or jump elsewhere.
 5. When working on a task: implement on a feature branch, add tests, run `make lint` + `make test` locally, summarise files changed and how to verify, then update the checkbox in this file.
 
+## Lessons learned (add to as the project progresses)
+
+- **Library defaults may encode implicit frame-of-reference assumptions.** Any parameter with a unit or scale (FPS, image size, sample rate, temporal window) must be verified against your data before accepting its default. Discovered: boxmot's `frame_rate=30` default caused 3× too-permissive lost-track tolerance on KITTI 10 FPS data (`buffer_size = int(frame_rate / 30 * track_buffer)`). Always set `frame_rate=10` for KITTI.
+
+- **Multi-class trackers default to class-agnostic matching — verify `per_class` in source.** boxmot's `per_class=False` default allows Car↔Pedestrian ID swaps at every IoU-sufficient proximity event. The bug is silent: no runtime error, just wrong HOTA. Always set `per_class=True, nr_classes=<your class count>` for class-preserving tracking.
+
 ## Anti-goals (do not do these)
 - Do not write a custom tracker from scratch. Use ByteTrack and BoT-SORT as published.
 - Do not use private datasets, AISUS data, or any non-public asset imagery.
