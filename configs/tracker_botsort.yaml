@@ -1,22 +1,36 @@
-# BoT-SORT config (task T7)
-tracker:
-  name: botsort
-  track_thresh: 0.5
-  match_thresh: 0.8
-  track_buffer: 30
-  new_track_thresh: 0.6
-  proximity_thresh: 0.5    # IoU gate for ReID association
-  appearance_thresh: 0.25  # cosine distance threshold for appearance match
-  with_reid: true
-  reid_model: osnet_x0_25_msmt17  # lightweight ReID backbone
-  cmc_method: sparseOptFlow       # camera motion compensation
-  frame_rate: 10
+# BoT-SORT config (task T7).
+#
+# Class isolation: one BotSort instance is created per class (nr_classes=2).
+# Each instance only sees detections of its own class, so lost Car tracks are
+# never matched against Pedestrian detections (and vice versa). This is the
+# workaround for boxmot 18.0.0's shared lost_stracks across per_class pools.
+#
+# frame_rate: 10 is MANDATORY — KITTI FPS; buffer_size = int(10/30*30) = 10 frames.
+# Library default (30) would give buffer_size=30 frames = 3.0 s tolerance at 10 FPS.
+#
+# with_reid: false — headline baseline (row 2). No model download, CI-safe.
+# Follow-up PR enables with_reid=true + OSNet x0_25 MSMT17 weights (row 3).
+#
+# Thresholds use boxmot BotSort.__init__ code defaults, NOT boxmot/configs/botsort.yaml
+# search-space bounds (which are 0.6 / 0.7 — higher than the code defaults).
+#
+# T4 swap: update detections_dir to runs/det/yolov8m_finetuned when T4 lands.
 
-input:
-  detections_dir: runs/det/yolov8m_finetuned
+name: botsort
+detections_dir: runs/det/yolov8m_zeroshot
+tracks_dir: runs/track/botsort
+data_root: data/kitti_tracking
+val_sequences: ["0001", "0006", "0013", "0017", "0019"]
 
-output:
-  tracks_dir: runs/track/botsort
-  format: mot16
-
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+track_buffer: 30
+match_thresh: 0.8
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+cmc_method: sof
+frame_rate: 10
+with_reid: false
+nr_classes: 2
 seed: 42
