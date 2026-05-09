@@ -1,23 +1,24 @@
 """Bounding box + track ID overlays on KITTI sequences. Task T8.
 
-Plan:
-- draw_tracks(image, tracks) — annotate one frame with bboxes coloured by ID.
-- write_video(seq, tracks, out_path) — render a sequence to mp4 for the demo.
-- Use OpenCV for drawing, ffmpeg via cv2.VideoWriter for mp4.
-- Stable ID-to-color mapping: hash track_id -> HSV color, convert to BGR.
+- id_to_color: deterministic ID -> BGR color via HSV hash.
+- draw_tracks: annotate one frame with bboxes coloured by track ID.
+- write_video: render a full sequence to mp4 using imageio (vendored ffmpeg).
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import cv2
+import imageio
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def id_to_color(track_id: int) -> tuple[int, int, int]:
     """Deterministic color for a track ID. Returns BGR for OpenCV."""
-    import cv2
-
     rng = np.random.default_rng(seed=track_id)
     h = int(rng.integers(0, 180))
     hsv = np.array([[[h, 200, 255]]], dtype=np.uint8)
@@ -30,14 +31,67 @@ def draw_tracks(image: np.ndarray, tracks: np.ndarray) -> np.ndarray:
 
     Args:
         image: HxWx3 BGR uint8.
-        tracks: Nx6 array — frame, id, x, y, w, h.
+        tracks: (N, 7) float32 [x1, y1, x2, y2, track_id, conf, cls]
+                as returned by read_mot16_v2_tracks for a single frame.
+                Empty (0, 7) is valid — returns unmodified copy.
 
     Returns:
         Annotated image (copy).
     """
-    raise NotImplementedError("Task T8.")
+    out = image.copy()
+    if tracks.shape[0] == 0:
+        return out
+
+    for row in tracks:
+        x1, y1, x2, y2 = int(row[0]), int(row[1]), int(row[2]), int(row[3])
+        track_id = int(row[4])
+        color = id_to_color(track_id)
+
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+
+        label = str(track_id)
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(out, (x1, y1 - th - baseline - 4), (x1 + tw + 4, y1), color, -1)
+        cv2.putText(out, label, (x1 + 2, y1 - baseline - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+    return out
 
 
-def write_video(seq_dir: Path, tracks_path: Path, out_path: Path, fps: int = 10) -> None:
-    """Render an annotated mp4 from a KITTI sequence + tracker output."""
-    raise NotImplementedError("Task T8.")
+def write_video(
+    seq_dir: Path,
+    tracks_by_frame: dict[int, np.ndarray],
+    out_path: Path,
+    fps: int = 10,
+) -> Path:
+    """Render an annotated mp4 from a KITTI sequence + tracker output.
+
+    Args:
+        seq_dir: Path to image_02/<seq>/ directory with .png frames.
+        tracks_by_frame: {frame_idx: (N, 7) array} from read_mot16_v2_tracks.
+        out_path: Where to write the .mp4 file.
+        fps: Frames per second (KITTI = 10).
+
+    Returns:
+        out_path for convenience.
+    """
+    frames = sorted(seq_dir.glob("*.png"))
+    if not frames:
+        raise FileNotFoundError(f"No .png frames in {seq_dir}")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    writer = imageio.get_writer(str(out_path), fps=fps, codec="libx264", quality=8)
+
+    for idx, frame_path in enumerate(frames):
+        img = cv2.imread(str(frame_path))
+        tracks = tracks_by_frame.get(idx, np.empty((0, 7), dtype=np.float32))
+        annotated = draw_tracks(img, tracks)
+        # imageio expects RGB, cv2 gives BGR
+        writer.append_data(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+
+    writer.close()
+
+    h, w = cv2.imread(str(frames[0])).shape[:2]
+    logger.info("Wrote %d frames to %s (%dx%d @ %d fps)", len(frames), out_path, w, h, fps)
+    return out_path
