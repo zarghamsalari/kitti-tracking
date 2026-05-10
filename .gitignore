@@ -56,3 +56,7 @@ logs/
 
 # T4: generated YOLO dataset
 data/kitti_yolo/
+
+# AI assistant config (kept local only)
+CLAUDE.md
+CLAUDE_CODE_SETUP.md
