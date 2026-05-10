@@ -19,10 +19,16 @@ emit two detections (a person and a bicycle) for one KITTI cyclist, so any
 zero-shot remap conflicts with the ``person -> Pedestrian`` mapping. We
 re-introduce Cyclist after fine-tuning (T4), where the model learns the
 merged concept directly.
+
+Class mapping for fine-tune (T4)
+--------------------------------
+5-class mapping: Car=0, Van=1, Truck=2, Pedestrian=3, Cyclist=4.
+Excludes Person_sitting, Tram, Misc, DontCare entirely.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -30,7 +36,9 @@ from pathlib import Path
 import cv2
 import yaml
 
-from tracking.data.kitti import KittiAnnotation, KittiSequence
+from tracking.data.kitti import KittiAnnotation, KittiSequence, load_sequence
+
+logger = logging.getLogger(__name__)
 
 # KITTI -> 2-class YOLO mapping for fine-tune (T4). The output head will be
 # rebuilt with nc=2 during fine-tuning, so we use a contiguous [0, 1] space.
@@ -51,6 +59,16 @@ KITTI_TO_COCO_ZEROSHOT: dict[str, int] = {
 # (from T3a, before the zero-shot vs fine-tune distinction was clear) still
 # resolves. Prefer the explicit names above for new code.
 KITTI_TO_YOLO_ZEROSHOT = KITTI_TO_YOLO_FINETUNE
+
+# 5-class YOLO mapping for T4 fine-tune. Excludes Person_sitting, Tram, Misc,
+# DontCare entirely — these are not detection targets.
+KITTI_TO_YOLO_5CLASS: dict[str, int] = {
+    "Car": 0,
+    "Van": 1,
+    "Truck": 2,
+    "Pedestrian": 3,
+    "Cyclist": 4,
+}
 
 # Canonical KITTI image size — actual dims are read per-sequence in
 # write_yolo_labels (see _read_image_size). Kept here for fixtures, docs,
@@ -414,3 +432,187 @@ def prepare_yolo_eval_dataset(
     )
 
     return data_yaml
+
+
+# ---------------------------------------------------------------------------
+# T4 fine-tune dataset preparation (5-class)
+# ---------------------------------------------------------------------------
+
+# Sequence-level train/val split — matches the tracker val set from CLAUDE.md.
+# Never split frames within a sequence; frame leakage inflates HOTA by 5-10 pts.
+_DEFAULT_VAL_SEQUENCES: list[str] = ["0001", "0006", "0013", "0017", "0019"]
+_DEFAULT_TRAIN_SEQUENCES: list[str] = [
+    "0000",
+    "0002",
+    "0003",
+    "0004",
+    "0005",
+    "0007",
+    "0008",
+    "0009",
+    "0010",
+    "0011",
+    "0012",
+    "0014",
+    "0015",
+    "0016",
+    "0018",
+    "0020",
+]
+
+
+def _clip_and_validate_bbox(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    img_w: int,
+    img_h: int,
+) -> tuple[float, float, float, float] | None:
+    """Clip bbox to image bounds. Returns None if degenerate (w or h <= 1px)."""
+    x1 = max(0.0, min(float(img_w), x1))
+    y1 = max(0.0, min(float(img_h), y1))
+    x2 = max(0.0, min(float(img_w), x2))
+    y2 = max(0.0, min(float(img_h), y2))
+    if (x2 - x1) <= 1.0 or (y2 - y1) <= 1.0:
+        return None
+    return x1, y1, x2, y2
+
+
+def prepare_kitti_yolo_finetune(
+    data_root: Path,
+    out_dir: Path,
+    class_map: dict[str, int] = KITTI_TO_YOLO_5CLASS,
+    val_sequences: list[str] | None = None,
+    train_sequences: list[str] | None = None,
+) -> dict:
+    """Prepare KITTI MOT data in YOLO format for fine-tuning.
+
+    Walks all sequences, splits into train/val by sequence name, writes::
+
+        out_dir/
+        ├── images/{train,val}/<seq>_<frame>.png
+        ├── labels/{train,val}/<seq>_<frame>.txt
+        └── data.yaml
+
+    Images are hardlinked (or copied on cross-volume) via :func:`_link_or_copy`.
+    Labels use the standard YOLO format: ``class_id cx cy w h`` normalised
+    to [0, 1]. Bboxes are clipped to image bounds; degenerate boxes (width
+    or height ≤ 1px after clipping) are silently skipped. Frames with no
+    surviving labels produce empty .txt files (negative examples for YOLO).
+
+    Args:
+        data_root: Path to ``data/kitti_tracking``.
+        out_dir: Output directory (e.g. ``data/kitti_yolo``).
+        class_map: KITTI class name -> YOLO class id. Only classes present
+                   in this map are emitted; all others are excluded.
+        val_sequences: Sequence names for val split. Defaults to project
+                       val set (0001, 0006, 0013, 0017, 0019).
+        train_sequences: Sequence names for train split. Defaults to all
+                         other 16 sequences.
+
+    Returns:
+        Stats dict with keys: ``train_images``, ``val_images``,
+        ``train_labels``, ``val_labels``, ``train_classes`` (per-class counts),
+        ``val_classes`` (per-class counts), ``skipped_degenerate``.
+    """
+    if val_sequences is None:
+        val_sequences = _DEFAULT_VAL_SEQUENCES
+    if train_sequences is None:
+        train_sequences = _DEFAULT_TRAIN_SEQUENCES
+
+    val_set = set(val_sequences)
+    train_set = set(train_sequences)
+    if val_set & train_set:
+        raise ValueError(f"Train/val overlap: {val_set & train_set}")
+
+    all_classes = tuple(class_map.keys())
+    class_names = [name for name, _ in sorted(class_map.items(), key=lambda x: x[1])]
+
+    stats: dict = {
+        "train_images": 0,
+        "val_images": 0,
+        "train_labels": 0,
+        "val_labels": 0,
+        "train_classes": {name: 0 for name in class_names},
+        "val_classes": {name: 0 for name in class_names},
+        "skipped_degenerate": 0,
+    }
+
+    for split_name, seq_names in [("train", train_sequences), ("val", val_sequences)]:
+        images_dir = out_dir / "images" / split_name
+        labels_dir = out_dir / "labels" / split_name
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+        for seq_name in seq_names:
+            seq = load_sequence(data_root, seq_name, classes=all_classes)
+            img_w, img_h = _read_image_size(seq)
+            logger.info(
+                "Processing %s/%s (%dx%d, %d frames)",
+                split_name,
+                seq_name,
+                img_w,
+                img_h,
+                seq.num_frames,
+            )
+
+            for frame_idx, frame_path in enumerate(seq.frames()):
+                stem = f"{seq_name}_{frame_idx:06d}"
+
+                # Link/copy image
+                target_img = images_dir / f"{stem}.png"
+                _link_or_copy(frame_path, target_img)
+                stats[f"{split_name}_images"] += 1
+
+                # Build labels for this frame
+                anns = seq.annotations_for_frame(frame_idx)
+                lines: list[str] = []
+                for ann in anns:
+                    if ann.obj_class not in class_map:
+                        continue
+                    clipped = _clip_and_validate_bbox(
+                        ann.x1,
+                        ann.y1,
+                        ann.x2,
+                        ann.y2,
+                        img_w,
+                        img_h,
+                    )
+                    if clipped is None:
+                        stats["skipped_degenerate"] += 1
+                        continue
+                    cx, cy, w, h = bbox_to_yolo(*clipped, img_w, img_h)
+                    class_id = class_map[ann.obj_class]
+                    lines.append(f"{class_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+                    stats[f"{split_name}_classes"][ann.obj_class] += 1
+
+                # Write label file (empty for negative examples)
+                label_path = labels_dir / f"{stem}.txt"
+                label_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+                stats[f"{split_name}_labels"] += len(lines)
+
+        logger.info(
+            "%s split: %d images, %d label lines",
+            split_name,
+            stats[f"{split_name}_images"],
+            stats[f"{split_name}_labels"],
+        )
+
+    # Write data.yaml
+    data_yaml_path = out_dir / "data.yaml"
+    data_yaml_path.write_text(
+        yaml.safe_dump(
+            {
+                "path": str(out_dir.resolve()),
+                "train": "images/train",
+                "val": "images/val",
+                "nc": len(class_names),
+                "names": class_names,
+            },
+            sort_keys=False,
+        )
+    )
+    logger.info("Wrote %s", data_yaml_path)
+
+    return stats
