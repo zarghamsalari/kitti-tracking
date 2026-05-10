@@ -90,8 +90,13 @@ def write_video(
 
     writer = imageio.get_writer(str(out_path), fps=fps, codec="libx264", quality=8)
 
+    h, w = 0, 0
     for idx, frame_path in enumerate(frames):
         img = cv2.imread(str(frame_path))
+        if img is None:
+            raise FileNotFoundError(f"Could not read frame: {frame_path}")
+        if idx == 0:
+            h, w = img.shape[:2]
         tracks = tracks_by_frame.get(idx, np.empty((0, 7), dtype=np.float32))
         annotated = draw_tracks(img, tracks)
         # imageio expects RGB, cv2 gives BGR
@@ -99,6 +104,5 @@ def write_video(
 
     writer.close()
 
-    h, w = cv2.imread(str(frames[0])).shape[:2]
     logger.info("Wrote %d frames to %s (%dx%d @ %d fps)", len(frames), out_path, w, h, fps)
     return out_path
