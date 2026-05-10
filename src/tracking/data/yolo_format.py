@@ -534,8 +534,8 @@ def prepare_kitti_yolo_finetune(
         "val_images": 0,
         "train_labels": 0,
         "val_labels": 0,
-        "train_classes": {name: 0 for name in class_names},
-        "val_classes": {name: 0 for name in class_names},
+        "train_classes": dict.fromkeys(class_names, 0),
+        "val_classes": dict.fromkeys(class_names, 0),
         "skipped_degenerate": 0,
     }
 
