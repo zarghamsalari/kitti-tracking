@@ -1,4 +1,4 @@
-.PHONY: install test lint format download detect track eval demo docker clean
+.PHONY: install test lint format download detect track eval render-demo demo docker clean
 
 PY ?= python
 TRACKER ?= bytetrack
@@ -31,6 +31,9 @@ track:
 
 eval:
 	bash scripts/run_eval.sh
+
+render-demo:
+	$(PY) scripts/render_demo.py
 
 demo:
 	streamlit run streamlit_app/app.py
