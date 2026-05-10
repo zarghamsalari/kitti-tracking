@@ -60,3 +60,6 @@ data/kitti_yolo/
 # AI assistant config (kept local only)
 CLAUDE.md
 CLAUDE_CODE_SETUP.md
+
+# Pre-rendered demo videos (bundled in Docker image only)
+streamlit_app/static/videos/

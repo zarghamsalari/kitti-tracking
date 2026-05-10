@@ -14,6 +14,7 @@ cd kitti-tracking
 make install
 make download          # ~15 GB
 make eval              # runs detect → track → metrics
+make render-demo       # pre-render 20 demo videos
 make demo              # streamlit on http://localhost:8501
 ```
 
