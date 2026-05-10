@@ -1,0 +1,34 @@
+# YOLOv8 detector config — fine-tuned variant (T4c).
+#
+# Sibling of detector_yolov8.yaml (zero-shot). Uses KITTI-trained weights
+# with 5-class head (Car=0, Van=1, Truck=2, Pedestrian=3, Cyclist=4).
+# Only Car and Pedestrian are kept for 2-class like-for-like ablation.
+
+detector:
+  weights: runs/train/yolov8m_kitti/weights/best.pt
+  imgsz: 1280
+  val_conf: 0.001
+  dump_conf: 0.1
+  iou: 0.5
+  classes: [0, 3]       # Fine-tuned head: Car=0, Pedestrian=3
+  device: ""
+
+dataset:
+  root: data/kitti_tracking
+  val_sequences: ["0001", "0006", "0013", "0017", "0019"]
+  yolo_eval_dir: data/yolo_kitti
+
+output:
+  det_dir: runs/det/yolov8m_finetuned
+  format: mot16
+
+seed: 42
+
+# Fine-tuned model class remap: model output class -> KITTI tracker space.
+# Car(0)->0, Pedestrian(3)->1. Matches zero-shot output convention.
+class_remap:
+  0: 0
+  3: 1
+
+# Skip Phase 1 mAP eval — already have val mAP from training.
+skip_eval: true

@@ -5,6 +5,8 @@ Two-phase pipeline driven by ``configs/detector_yolov8.yaml``:
 1. **mAP eval** — ``ultralytics.YOLO.val()`` against YOLO-format labels
    for the configured val split. Confidence threshold is set very low
    (``val_conf``, default 0.001) so the full PR curve feeds into mAP.
+   Skippable via ``skip_eval: true`` in config (e.g. for fine-tuned runs
+   where training already reported val mAP).
 2. **MOT16 dump** — per-frame inference at ``dump_conf`` (default 0.1)
    on raw KITTI val frames, converting boxes to MOT16 rows under
    ``output.det_dir/<seq>.txt``. ``dump_conf`` is deliberately low to
@@ -28,13 +30,10 @@ serve different phases:
   by raw integer and most "matches" are coincidental IoU overlaps with
   semantically different classes (the mAP ≈ 0 collapse seen on the
   first run before this design was correct).
-* **MOT16 dump phase** uses :func:`coco_to_kitti` to remap COCO model
-  output (person=0, car=2) into KITTI tracker input space (Pedestrian=1,
-  Car=0) — that's what T5/T7 trackers and the eventual TrackEval
-  consumer expect.
-
-T4 will switch the eval phase to :data:`KITTI_TO_YOLO_FINETUNE` (a
-contiguous nc=2 space) once the model is retrained with KITTI heads.
+* **MOT16 dump phase** uses a class remap dict to convert model output
+  class indices into KITTI tracker input space (Car=0, Pedestrian=1).
+  For zero-shot: ``{0: 1, 2: 0}`` (COCO person=0, car=2 → KITTI).
+  For fine-tuned: ``{0: 0, 3: 1}`` (5-class head Car=0, Pedestrian=3).
 """
 
 from __future__ import annotations
@@ -124,6 +123,8 @@ class DetectConfig(BaseModel):
     dataset: DatasetConfig
     output: OutputConfig
     seed: int = 42
+    class_remap: dict[int, int] | None = None  # model cls -> KITTI cls; None = coco_to_kitti
+    skip_eval: bool = False  # skip Phase 1 mAP eval (e.g. fine-tuned runs)
 
 
 def _load_config(path: Path) -> DetectConfig:
@@ -167,8 +168,15 @@ def _dump_mot16_for_sequence(
     seq: KittiSequence,
     out_path: Path,
     cfg: DetectorConfig,
+    class_remap: dict[int, int] | None = None,
 ) -> int:
-    """Run inference frame-by-frame, write MOT16 rows. Returns row count."""
+    """Run inference frame-by-frame, write MOT16 rows. Returns row count.
+
+    Args:
+        class_remap: Model output class -> KITTI tracker class.
+            If ``None``, falls back to :func:`coco_to_kitti` (zero-shot).
+            Keys not in the dict are filtered out.
+    """
     logger.info("Phase 2 [%s]: %d frames, dumping...", seq.name, seq.num_frames)
     rows: list[str] = []
     for frame in range(seq.num_frames):
@@ -186,8 +194,11 @@ def _dump_mot16_for_sequence(
         )
         for r in results:
             for box in r.boxes:
-                coco_class = int(box.cls)
-                kitti_cls = coco_to_kitti(coco_class)
+                model_class = int(box.cls)
+                if class_remap is not None:
+                    kitti_cls = class_remap.get(model_class)
+                else:
+                    kitti_cls = coco_to_kitti(model_class)
                 if kitti_cls is None:
                     continue
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -201,43 +212,45 @@ def _dump_mot16_for_sequence(
 
 
 def run_detection(config_path: Path) -> None:
-    """End-to-end zero-shot detection pipeline.
+    """End-to-end detection pipeline (zero-shot or fine-tuned).
 
     Steps:
         1. Load + validate config (pydantic)
         2. Seed for determinism
-        3. Materialise YOLO-format val dataset
-        4. Phase 1: mAP eval via ``model.val()``
-        5. Phase 2: MOT16 dump via per-frame ``model(image)``
-        6. Write ``run_meta.json``
+        3. (Optional) Phase 1: mAP eval via ``model.val()``
+        4. Phase 2: MOT16 dump via per-frame ``model(image)``
+        5. Write ``run_meta.json``
     """
     cfg = _load_config(config_path)
     set_seed(cfg.seed)
 
     val_ds = KittiTrackingDataset.from_split(cfg.dataset.root, cfg.dataset.val_sequences)
-    # Zero-shot eval: labels MUST be in COCO80 index space so that
-    # COCO-pretrained predictions (class 0=person, 2=car) match GT by class.
-    # T4 will switch to KITTI_TO_YOLO_FINETUNE + 2-class names list.
-    data_yaml = prepare_yolo_eval_dataset(
-        val_ds.sequences,
-        cfg.dataset.yolo_eval_dir,
-        class_map=KITTI_TO_COCO_ZEROSHOT,
-        class_names=COCO80_NAMES,
-        split="val",
-    )
 
     # Heavy imports deferred so test environments without these can import the module.
     from ultralytics import YOLO  # type: ignore[import-untyped]
 
     model = YOLO(cfg.detector.weights)
 
-    eval_summary = _run_eval_phase(model, data_yaml, cfg.detector)
+    eval_summary: EvalSummary | None = None
+    if cfg.skip_eval:
+        logger.info("Skipping Phase 1 mAP eval (skip_eval=True)")
+    else:
+        # Zero-shot eval: labels MUST be in COCO80 index space so that
+        # COCO-pretrained predictions (class 0=person, 2=car) match GT by class.
+        data_yaml = prepare_yolo_eval_dataset(
+            val_ds.sequences,
+            cfg.dataset.yolo_eval_dir,
+            class_map=KITTI_TO_COCO_ZEROSHOT,
+            class_names=COCO80_NAMES,
+            split="val",
+        )
+        eval_summary = _run_eval_phase(model, data_yaml, cfg.detector)
 
     cfg.output.det_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Phase 2: dumping MOT16 detections...")
     for seq in val_ds.sequences:
         out_path = cfg.output.det_dir / f"{seq.name}.txt"
-        n = _dump_mot16_for_sequence(model, seq, out_path, cfg.detector)
+        n = _dump_mot16_for_sequence(model, seq, out_path, cfg.detector, cfg.class_remap)
         logger.info("[%s] %d detections -> %s", seq.name, n, out_path)
 
     weights_path = Path(cfg.detector.weights)

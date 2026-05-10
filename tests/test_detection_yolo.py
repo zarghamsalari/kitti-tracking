@@ -10,9 +10,12 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
+from tracking.data.kitti import KittiSequence
 from tracking.detection.run_meta import (
     EvalSummary,
     RunMeta,
@@ -22,6 +25,8 @@ from tracking.detection.run_meta import (
 )
 from tracking.detection.yolo import (
     COCO_TO_KITTI,
+    DetectorConfig,
+    _dump_mot16_for_sequence,
     coco_to_kitti,
     detection_to_mot16_row,
 )
@@ -217,3 +222,66 @@ def test_file_sha256_known_value(tmp_path: Path) -> None:
     # echo -n "hello world" | sha256sum
     expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     assert file_sha256(p) == expected
+
+
+# --- _dump_mot16_for_sequence + class_remap ---------------------------
+
+
+def _make_fake_sequence(tmp_path: Path, num_frames: int = 2) -> KittiSequence:
+    """Create a KittiSequence with dummy PNG files."""
+    img_dir = tmp_path / "image_02" / "0099"
+    img_dir.mkdir(parents=True)
+    for i in range(num_frames):
+        # 1x1 white PNG — just needs to exist for the path check
+        (img_dir / f"{i:06d}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+    return KittiSequence(name="0099", image_dir=img_dir)
+
+
+def _make_mock_box(cls: int, conf: float = 0.9) -> MagicMock:
+    """Mock a single ultralytics Box object."""
+    box = MagicMock()
+    box.cls = cls
+    box.conf = conf
+    box.xyxy = [np.array([10.0, 20.0, 110.0, 70.0])]
+    return box
+
+
+def _make_mock_model(class_ids: list[int]) -> MagicMock:
+    """Mock YOLO model that returns one box per class_id per frame."""
+    model = MagicMock()
+    result = MagicMock()
+    result.boxes = [_make_mock_box(c) for c in class_ids]
+    model.return_value = [result]
+    return model
+
+
+def test_dump_mot16_default_uses_coco_to_kitti(tmp_path: Path) -> None:
+    """class_remap=None falls back to coco_to_kitti: COCO 0->KITTI 1, COCO 2->KITTI 0."""
+    seq = _make_fake_sequence(tmp_path)
+    out = tmp_path / "det.txt"
+    cfg = DetectorConfig(weights="fake.pt")
+    model = _make_mock_model([0, 2])  # COCO person=0, car=2
+
+    n = _dump_mot16_for_sequence(model, seq, out, cfg, class_remap=None)
+
+    assert n > 0
+    lines = out.read_text().strip().split("\n")
+    classes_found = {line.split(",")[7] for line in lines}
+    assert classes_found == {"0", "1"}  # KITTI Car=0, Pedestrian=1
+
+
+def test_dump_mot16_custom_remap_for_finetuned(tmp_path: Path) -> None:
+    """class_remap={0:0, 3:1} remaps fine-tuned head; filters out unmapped classes."""
+    seq = _make_fake_sequence(tmp_path)
+    out = tmp_path / "det.txt"
+    cfg = DetectorConfig(weights="fake.pt", classes=[0, 1, 3])
+    model = _make_mock_model([0, 1, 3])  # Car=0, Van=1, Pedestrian=3
+
+    remap = {0: 0, 3: 1}  # Car->0, Pedestrian->1; Van(1) filtered
+    n = _dump_mot16_for_sequence(model, seq, out, cfg, class_remap=remap)
+
+    lines = out.read_text().strip().split("\n")
+    classes_found = {line.split(",")[7] for line in lines}
+    assert classes_found == {"0", "1"}  # Car and Pedestrian only
+    # Van (model class 1) must be filtered out — 2 mapped classes x 2 frames = 4 rows
+    assert n == 4
