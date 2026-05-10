@@ -6,6 +6,18 @@ A reproducible pipeline:
 
 [![CI](https://github.com/zarghamsalari/kitti-tracking/actions/workflows/ci.yml/badge.svg)](https://github.com/zarghamsalari/kitti-tracking/actions/workflows/ci.yml)
 
+
+## Demo
+
+Pre-rendered tracking output from the zero-shot YOLOv8m + ByteTrack pipeline.
+Full 4-cell ablation interactive at the [live demo](https://kitti-mot-demo.onrender.com).
+
+**Pedestrian tracking** (zero-shot + ByteTrack, sequence 0019):
+![Pedestrian demo](docs/demo_pedestrian.gif)
+
+**Car tracking** (zero-shot + ByteTrack, sequence 0001):
+![Car demo](docs/demo_car.gif)
+
 ## Quick start
 
 ```bash
