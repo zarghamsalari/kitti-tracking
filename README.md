@@ -13,10 +13,10 @@ Pre-rendered tracking output from the zero-shot YOLOv8m + ByteTrack pipeline.
 Full 4-cell ablation interactive at the [live demo](https://kitti-mot-demo.onrender.com).
 
 **Pedestrian tracking** (zero-shot + ByteTrack, sequence 0019):
-![Pedestrian demo](docs/demo_pedestrian.gif)
+<img src="docs/demo_pedestrian.gif" width="100%" alt="Pedestrian demo">
 
 **Car tracking** (zero-shot + ByteTrack, sequence 0001):
-![Car demo](docs/demo_car.gif)
+<img src="docs/demo_car.gif" width="100%" alt="Car demo">
 
 ## Quick start
 
